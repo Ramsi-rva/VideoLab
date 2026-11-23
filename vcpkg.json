@@ -1,0 +1,11 @@
+{
+  "name": "videolab",
+  "version": "1.0.0",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "swscale", "swresample"]
+    }
+  ]
+}
