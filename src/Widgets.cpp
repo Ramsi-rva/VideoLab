@@ -1,31 +1,28 @@
 #include "Widgets.h"
 
-#include <windowsx.h>
-
 #include <algorithm>
 #include <cmath>
 
 #include "Theme.h"
 
-static const wchar_t* kWidgetClass = L"VLWidget";
-static const wchar_t* kPopupClass = L"VLPopup";
-static std::vector<std::unique_ptr<Widget>> g_widgets;
+static std::vector<std::unique_ptr<CVLWidget>> g_widgets;
 
 static const double kPi = 3.14159265358979323846;
 
-const std::vector<std::unique_ptr<Widget>>& allWidgets() { return g_widgets; }
+const std::vector<std::unique_ptr<CVLWidget>>& allWidgets() { return g_widgets; }
 
-Widget* findWidget(int id) {
+CVLWidget* findWidget(int id) {
     for (auto& w : g_widgets) if (w->id == id) return w.get();
     return nullptr;
 }
 
-void invalidateWidget(Widget* w) {
-    if (w && w->hwnd) InvalidateRect(w->hwnd, nullptr, FALSE);
+void invalidateWidget(CVLWidget* w) {
+    if (w && w->GetSafeHwnd()) w->Invalidate(FALSE);
 }
 
-static Widget* W(HWND h) { return (Widget*)GetWindowLongPtrW(h, GWLP_USERDATA); }
-static void notify(Widget* w, int ev) { SendMessageW(GetParent(w->hwnd), WM_WIDGET, (WPARAM)w->id, (LPARAM)ev); }
+void CVLWidget::notify(int ev) {
+    if (CWnd* p = GetParent()) p->SendMessage(WM_WIDGET, (WPARAM)id, (LPARAM)ev);
+}
 
 // ---------------- Geometria ----------------
 struct SliderGeo { int x0, x1, y; RECT label, value; };
@@ -134,7 +131,7 @@ static HBITMAP buildWheel(int D) {
 }
 
 // ---------------- Dibujo ----------------
-static void drawIcon(HDC dc, WIcon ic, const RECT& rc, COLORREF col) {
+static void drawIcon(CDC* dc, WIcon ic, const RECT& rc, COLORREF col) {
     int cx = (rc.left + rc.right) / 2, cy = (rc.top + rc.bottom) / 2;
     switch (ic) {
     case IC_PLAY:
@@ -162,36 +159,36 @@ static void drawIcon(HDC dc, WIcon ic, const RECT& rc, COLORREF col) {
     }
 }
 
-static void paintButton(HDC dc, Widget* w, const RECT& rc, bool enabled) {
-    COLORREF fill = w->primary ? (w->down ? RGB(40, 100, 170) : (w->hover ? RGB(84, 156, 232) : Theme::blue))
-                               : (w->down ? Theme::btnDown : (w->hover ? Theme::btnHot : Theme::btn));
-    COLORREF border = w->primary ? RGB(40, 100, 170) : Theme::border;
-    COLORREF fg = enabled ? (w->primary ? RGB(255, 255, 255) : Theme::text) : RGB(92, 92, 100);
+void CVLWidget::paintButton(CDC* dc, const RECT& rc, bool enabled) {
+    COLORREF fill = primary ? (down ? RGB(40, 100, 170) : (hover ? RGB(84, 156, 232) : Theme::blue))
+                            : (down ? Theme::btnDown : (hover ? Theme::btnHot : Theme::btn));
+    COLORREF border = primary ? RGB(40, 100, 170) : Theme::border;
+    COLORREF fg = enabled ? (primary ? RGB(255, 255, 255) : Theme::text) : RGB(92, 92, 100);
     if (!enabled) { fill = Theme::panel; border = RGB(52, 52, 58); }
     roundBox(dc, rc, 6, fill, border);
-    if (w->icon != IC_NONE) drawIcon(dc, w->icon, rc, fg);
-    else textIn(dc, rc, w->text, fg, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
+    if (icon != IC_NONE) drawIcon(dc, icon, rc, fg);
+    else textIn(dc, rc, text, fg, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
 }
 
-static void paintToggle(HDC dc, Widget* w, const RECT& rc, bool enabled) {
+void CVLWidget::paintToggle(CDC* dc, const RECT& rc, bool enabled) {
     int cy = (rc.top + rc.bottom) / 2;
     RECT box{ rc.left + 2, cy - 8, rc.left + 18, cy + 8 };
-    roundBox(dc, box, 4, w->checked ? Theme::blue : Theme::field, w->hover ? Theme::textDim : Theme::border);
-    if (w->checked) {
+    roundBox(dc, box, 4, checked ? Theme::blue : Theme::field, hover ? Theme::textDim : Theme::border);
+    if (checked) {
         lineTo(dc, box.left + 4, cy, box.left + 7, cy + 4, RGB(255, 255, 255), 2);
         lineTo(dc, box.left + 7, cy + 4, box.left + 13, cy - 4, RGB(255, 255, 255), 2);
     }
     RECT tr{ rc.left + 26, rc.top, rc.right, rc.bottom };
-    textIn(dc, tr, w->text, enabled ? Theme::text : Theme::textDim, DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
+    textIn(dc, tr, text, enabled ? Theme::text : Theme::textDim, DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
 }
 
-static void paintSlider(HDC dc, Widget* w, const RECT& rc, bool enabled) {
-    SliderGeo g = sliderGeo(w, rc);
+void CVLWidget::paintSlider(CDC* dc, const RECT& rc, bool enabled) {
+    SliderGeo g = sliderGeo(this, rc);
     COLORREF fg = enabled ? Theme::text : RGB(92, 92, 100);
-    if (!w->text.empty()) {
-        textIn(dc, g.label, w->text, enabled ? Theme::textDim : RGB(80, 80, 88), DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
+    if (!text.empty()) {
+        textIn(dc, g.label, text, enabled ? Theme::textDim : RGB(80, 80, 88), DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
         wchar_t b[32];
-        wfmt(b, w->fmt, w->val);
+        wfmt(b, fmt, val);
         RECT vr = g.value;
         roundBox(dc, { vr.left, vr.top + 4, vr.right, vr.bottom - 4 }, 4, Theme::field, Theme::line);
         textIn(dc, vr, b, fg, DT_CENTER | DT_VCENTER | DT_SINGLELINE, fSmall);
@@ -199,396 +196,362 @@ static void paintSlider(HDC dc, Widget* w, const RECT& rc, bool enabled) {
     // pista
     RECT track{ g.x0, g.y - 2, g.x1, g.y + 2 };
     fillRc(dc, track, enabled ? RGB(14, 14, 16) : RGB(30, 30, 34));
-    int kx = valToX(w, w->val, g.x0, g.x1);
-    int zx = (w->minv < 0 && w->maxv > 0) ? valToX(w, 0, g.x0, g.x1) : g.x0;
+    int kx = valToX(this, val, g.x0, g.x1);
+    int zx = (minv < 0 && maxv > 0) ? valToX(this, 0, g.x0, g.x1) : g.x0;
     RECT fillr{ std::min(kx, zx), g.y - 2, std::max(kx, zx), g.y + 2 };
     if (enabled) fillRc(dc, fillr, Theme::blue);
-    if (w->minv < 0 && w->maxv > 0) lineTo(dc, zx, g.y - 5, zx, g.y + 5, Theme::border);
+    if (minv < 0 && maxv > 0) lineTo(dc, zx, g.y - 5, zx, g.y + 5, Theme::border);
     // perilla
-    COLORREF kc = !enabled ? RGB(70, 70, 78) : ((w->down || w->hover) ? RGB(255, 255, 255) : RGB(206, 206, 212));
-    HBRUSH kb = CreateSolidBrush(kc);
-    HPEN kp = CreatePen(PS_SOLID, 1, RGB(20, 20, 22));
-    HGDIOBJ ob = SelectObject(dc, kb), op = SelectObject(dc, kp);
-    Ellipse(dc, kx - 6, g.y - 6, kx + 7, g.y + 7);
-    SelectObject(dc, ob);
-    SelectObject(dc, op);
-    DeleteObject(kb);
-    DeleteObject(kp);
+    COLORREF kc = !enabled ? RGB(70, 70, 78) : ((down || hover) ? RGB(255, 255, 255) : RGB(206, 206, 212));
+    ellipse(dc, kx - 6, g.y - 6, kx + 7, g.y + 7, kc, RGB(20, 20, 22));
 }
 
-static void paintDrop(HDC dc, Widget* w, const RECT& rc, bool enabled) {
+void CVLWidget::paintDrop(CDC* dc, const RECT& rc, bool enabled) {
     int width = rc.right - rc.left;
-    bool hasLabel = !w->text.empty();
-    int lw = hasLabel ? (w->labelW > 0 ? w->labelW : std::min(110, width * 4 / 10)) : 0;
+    bool hasLabel = !text.empty();
+    int lw = hasLabel ? (labelW > 0 ? labelW : std::min(110, width * 4 / 10)) : 0;
     if (hasLabel) {
         RECT lr{ rc.left, rc.top, rc.left + lw, rc.bottom };
-        textIn(dc, lr, w->text, enabled ? Theme::textDim : RGB(80, 80, 88), DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
+        textIn(dc, lr, text, enabled ? Theme::textDim : RGB(80, 80, 88), DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
     }
     RECT box{ rc.left + lw, rc.top + 2, rc.right, rc.bottom - 2 };
-    roundBox(dc, box, 5, enabled ? (w->hover || w->down ? Theme::panelHi : Theme::field) : Theme::panel,
-             w->hover && enabled ? Theme::textDim : Theme::border);
-    std::wstring cur = (w->sel >= 0 && w->sel < (int)w->items.size()) ? w->items[w->sel] : L"";
+    roundBox(dc, box, 5, enabled ? (hover || down ? Theme::panelHi : Theme::field) : Theme::panel,
+             hover && enabled ? Theme::textDim : Theme::border);
+    std::wstring cur = (sel >= 0 && sel < (int)items.size()) ? items[sel] : L"";
     RECT tr{ box.left + 8, box.top, box.right - 22, box.bottom };
     textIn(dc, tr, cur, enabled ? Theme::text : RGB(92, 92, 100), DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
     int ax = box.right - 12, ay = (box.top + box.bottom) / 2;
     triangle(dc, { ax - 4, ay - 2 }, { ax + 4, ay - 2 }, { ax, ay + 3 }, enabled ? Theme::textDim : RGB(70, 70, 78));
 }
 
-static void paintWheel(HDC dc, Widget* w, const RECT& rc, bool enabled) {
+void CVLWidget::paintWheel(CDC* dc, const RECT& rc, bool enabled) {
     int width = rc.right - rc.left;
     WheelGeo g = wheelGeo(rc);
     int D = g.R * 2;
-    if (!w->wheelBmp || w->wheelD != D) {
-        if (w->wheelBmp) DeleteObject(w->wheelBmp);
-        w->wheelBmp = buildWheel(D);
-        w->wheelD = D;
+    if (!wheelBmp.GetSafeHandle() || wheelD != D) {
+        wheelBmp.DeleteObject();
+        wheelBmp.Attach(buildWheel(D));
+        wheelD = D;
     }
     // titulo
     RECT tr{ rc.left, rc.top + 2, rc.right, rc.top + 20 };
-    textIn(dc, tr, w->text, Theme::text, DT_CENTER | DT_SINGLELINE, fBold);
+    textIn(dc, tr, text, Theme::text, DT_CENTER | DT_SINGLELINE, fBold);
 
     // rueda
-    if (w->wheelBmp) {
-        HDC mem = CreateCompatibleDC(dc);
-        HGDIOBJ old = SelectObject(mem, w->wheelBmp);
-        BitBlt(dc, g.cx - g.R, g.cy - g.R, D, D, mem, 0, 0, SRCCOPY);
-        SelectObject(mem, old);
-        DeleteDC(mem);
+    if (wheelBmp.GetSafeHandle()) {
+        CDC mem;
+        mem.CreateCompatibleDC(dc);
+        CBitmap* old = mem.SelectObject(&wheelBmp);
+        dc->BitBlt(g.cx - g.R, g.cy - g.R, D, D, &mem, 0, 0, SRCCOPY);
+        mem.SelectObject(old);
     }
     lineTo(dc, g.cx - g.R + 6, g.cy, g.cx + g.R - 6, g.cy, RGB(70, 70, 76));
     lineTo(dc, g.cx, g.cy - g.R + 6, g.cx, g.cy + g.R - 6, RGB(70, 70, 76));
 
     // punto
     double pr = g.R * 0.88;
-    int px = g.cx + (int)std::lround(w->wx * pr);
-    int py = g.cy - (int)std::lround(w->wy * pr);
-    HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
-    HPEN pw = CreatePen(PS_SOLID, 2, enabled ? RGB(255, 255, 255) : RGB(100, 100, 108));
-    HGDIOBJ ob = SelectObject(dc, nb), op = SelectObject(dc, pw);
-    Ellipse(dc, px - 7, py - 7, px + 8, py + 8);
-    SelectObject(dc, ob);
-    SelectObject(dc, op);
-    DeleteObject(pw);
+    int px = g.cx + (int)std::lround(wx * pr);
+    int py = g.cy - (int)std::lround(wy * pr);
+    ellipse(dc, px - 7, py - 7, px + 8, py + 8, CLR_INVALID, enabled ? RGB(255, 255, 255) : RGB(100, 100, 108), 2);
 
     // master
     int ym = g.ym;
     RECT track{ g.x0, ym - 2, g.x1, ym + 2 };
     fillRc(dc, track, RGB(14, 14, 16));
-    int kx = valToX(w, w->val, g.x0, g.x1), zx = valToX(w, 0, g.x0, g.x1);
+    int kx = valToX(this, val, g.x0, g.x1), zx = valToX(this, 0, g.x0, g.x1);
     RECT fr{ std::min(kx, zx), ym - 2, std::max(kx, zx), ym + 2 };
     if (enabled) fillRc(dc, fr, Theme::blue);
     lineTo(dc, zx, ym - 5, zx, ym + 5, Theme::border);
-    HBRUSH kb = CreateSolidBrush(w->drag == 2 ? RGB(255, 255, 255) : RGB(206, 206, 212));
-    HPEN kp = CreatePen(PS_SOLID, 1, RGB(20, 20, 22));
-    HGDIOBJ ob2 = SelectObject(dc, kb), op2 = SelectObject(dc, kp);
-    Ellipse(dc, kx - 6, ym - 6, kx + 7, ym + 7);
-    SelectObject(dc, ob2);
-    SelectObject(dc, op2);
-    DeleteObject(kb);
-    DeleteObject(kp);
+    ellipse(dc, kx - 6, ym - 6, kx + 7, ym + 7, drag == 2 ? RGB(255, 255, 255) : RGB(206, 206, 212), RGB(20, 20, 22));
 
     // valores R G B y master
-    double m = std::min(1.0, std::sqrt(w->wx * w->wx + w->wy * w->wy));
-    double th = std::atan2(w->wy, w->wx);
+    double m = std::min(1.0, std::sqrt(wx * wx + wy * wy));
+    double th = std::atan2(wy, wx);
     double rgb[3] = { m * std::cos(th), m * std::cos(th - 2 * kPi / 3), m * std::cos(th - 4 * kPi / 3) };
     wchar_t b[96];
-    wfmt(b, L"Y %+.2f    R %+.2f   G %+.2f   B %+.2f", w->val, rgb[0], rgb[1], rgb[2]);
+    wfmt(b, L"Y %+.2f    R %+.2f   G %+.2f   B %+.2f", val, rgb[0], rgb[1], rgb[2]);
     RECT vr{ rc.left, ym + 9, rc.left + width, rc.bottom };
     textIn(dc, vr, b, Theme::textDim, DT_CENTER | DT_SINGLELINE, fSmall);
 }
 
-static void paintWidget(HWND h) {
-    Widget* w = W(h);
-    PAINTSTRUCT ps;
-    HDC hdc = BeginPaint(h, &ps);
-    RECT rc;
-    GetClientRect(h, &rc);
-    if (w) {
-        HDC dc = CreateCompatibleDC(hdc);
-        HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
-        HGDIOBJ old = SelectObject(dc, bmp);
-        fillRc(dc, rc, Theme::panel);
-        SetBkMode(dc, TRANSPARENT);
-        bool en = IsWindowEnabled(h) != FALSE;
-        switch (w->type) {
-        case WT_BUTTON: paintButton(dc, w, rc, en); break;
-        case WT_TOGGLE: paintToggle(dc, w, rc, en); break;
-        case WT_SLIDER: paintSlider(dc, w, rc, en); break;
-        case WT_DROP:   paintDrop(dc, w, rc, en); break;
-        case WT_WHEEL:  paintWheel(dc, w, rc, en); break;
-        }
-        BitBlt(hdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
-        SelectObject(dc, old);
-        DeleteObject(bmp);
-        DeleteDC(dc);
-    }
-    EndPaint(h, &ps);
+// ---------------- Mapa de mensajes del control ----------------
+BEGIN_MESSAGE_MAP(CVLWidget, CWnd)
+    ON_WM_ERASEBKGND()
+    ON_WM_PAINT()
+    ON_WM_MOUSEMOVE()
+    ON_WM_MOUSELEAVE()
+    ON_WM_LBUTTONDOWN()
+    ON_WM_LBUTTONDBLCLK()
+    ON_WM_LBUTTONUP()
+    ON_WM_CAPTURECHANGED()
+    ON_WM_ENABLE()
+END_MESSAGE_MAP()
+
+BOOL CVLWidget::CreateWidget(CWnd* parent) {
+    // AfxRegisterWndClass devuelve un bufer estatico que se reutiliza: se guarda una copia del nombre
+    static const std::wstring cls = AfxRegisterWndClass(CS_DBLCLKS, ::LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr);
+    return Create(cls.c_str(), L"", WS_CHILD, CRect(0, 0, 10, 10), parent, 0);
 }
 
-// ---------------- Desplegable: ventana emergente ----------------
-struct PopupData { Widget* w; int hot; int itemH; bool closing; };
-
-static LRESULT CALLBACK PopupProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
-    PopupData* d = (PopupData*)GetWindowLongPtrW(h, GWLP_USERDATA);
-    switch (m) {
-    case WM_MOUSEMOVE:
-        if (d) {
-            int idx = GET_Y_LPARAM(lp) / d->itemH;
-            if (idx != d->hot) { d->hot = idx; InvalidateRect(h, nullptr, FALSE); }
-        }
-        return 0;
-    case WM_LBUTTONDOWN: { // el soltar del clic que abrio el menu se ignora a proposito
-        if (!d || d->closing) return 0;
-        RECT rc;
-        GetClientRect(h, &rc);
-        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        bool inside = PtInRect(&rc, pt) != FALSE;
-        int idx = pt.y / d->itemH;
-        Widget* w = d->w;
-        bool ok = inside && idx >= 0 && idx < (int)w->items.size();
-        d->closing = true;
-        ReleaseCapture();
-        DestroyWindow(h);
-        if (ok) {
-            w->sel = idx;
-            invalidateWidget(w);
-            notify(w, EV_CLICK);
-        }
-        return 0;
+void CVLWidget::OnPaint() {
+    CPaintDC pdc(this);
+    CRect rc;
+    GetClientRect(&rc);
+    // doble buffer: se dibuja en memoria y se copia de una vez
+    CDC mem;
+    mem.CreateCompatibleDC(&pdc);
+    CBitmap bmp;
+    bmp.CreateCompatibleBitmap(&pdc, std::max(1, rc.Width()), std::max(1, rc.Height()));
+    CBitmap* old = mem.SelectObject(&bmp);
+    fillRc(&mem, rc, Theme::panel);
+    mem.SetBkMode(TRANSPARENT);
+    bool en = IsWindowEnabled() != FALSE;
+    switch (type) {
+    case WT_BUTTON: paintButton(&mem, rc, en); break;
+    case WT_TOGGLE: paintToggle(&mem, rc, en); break;
+    case WT_SLIDER: paintSlider(&mem, rc, en); break;
+    case WT_DROP:   paintDrop(&mem, rc, en); break;
+    case WT_WHEEL:  paintWheel(&mem, rc, en); break;
     }
-    case WM_CAPTURECHANGED:
-        if (d && !d->closing) { d->closing = true; DestroyWindow(h); }
-        return 0;
-    case WM_ERASEBKGND: return 1;
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC dc = BeginPaint(h, &ps);
-        RECT rc;
-        GetClientRect(h, &rc);
-        fillRc(dc, rc, Theme::field);
-        if (d) {
-            for (int i = 0; i < (int)d->w->items.size(); ++i) {
-                RECT ir{ rc.left + 2, i * d->itemH + 2, rc.right - 2, (i + 1) * d->itemH };
-                if (i == d->hot) fillRc(dc, ir, Theme::blue);
-                RECT tr{ ir.left + 22, ir.top, ir.right - 6, ir.bottom };
-                textIn(dc, tr, d->w->items[i], i == d->hot ? RGB(255, 255, 255) : Theme::text,
-                       DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
-                if (i == d->w->sel) {
-                    int cy = (ir.top + ir.bottom) / 2;
-                    lineTo(dc, ir.left + 7, cy, ir.left + 10, cy + 3, i == d->hot ? RGB(255, 255, 255) : Theme::blue, 2);
-                    lineTo(dc, ir.left + 10, cy + 3, ir.left + 15, cy - 3, i == d->hot ? RGB(255, 255, 255) : Theme::blue, 2);
-                }
-            }
-        }
-        HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
-        HPEN bp = CreatePen(PS_SOLID, 1, Theme::border);
-        HGDIOBJ ob = SelectObject(dc, nb), op = SelectObject(dc, bp);
-        Rectangle(dc, rc.left, rc.top, rc.right, rc.bottom);
-        SelectObject(dc, ob);
-        SelectObject(dc, op);
-        DeleteObject(bp);
-        EndPaint(h, &ps);
-        return 0;
-    }
-    case WM_NCDESTROY:
-        delete d;
-        SetWindowLongPtrW(h, GWLP_USERDATA, 0);
-        break;
-    }
-    return DefWindowProcW(h, m, wp, lp);
+    pdc.BitBlt(0, 0, rc.Width(), rc.Height(), &mem, 0, 0, SRCCOPY);
+    mem.SelectObject(old);
 }
 
-static void openPopup(Widget* w) {
-    RECT wr;
-    GetWindowRect(w->hwnd, &wr);
-    const int itemH = 26;
-    int count = (int)w->items.size();
-    int width = std::max<int>(wr.right - wr.left, 150);
-    int height = count * itemH + 4;
-    HMONITOR mon = MonitorFromWindow(w->hwnd, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi{};
-    mi.cbSize = sizeof(mi);
-    GetMonitorInfoW(mon, &mi);
-    int x = std::min<int>(wr.left, mi.rcWork.right - width);
-    int y = wr.bottom;
-    if (y + height > mi.rcWork.bottom) y = wr.top - height;
-
-    PopupData* d = new PopupData{ w, w->sel, itemH, false };
-    HWND p = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, kPopupClass, L"", WS_POPUP,
-                             x, y, width, height, GetParent(w->hwnd), nullptr, GetModuleHandleW(nullptr), nullptr);
-    if (!p) { delete d; return; }
-    SetWindowLongPtrW(p, GWLP_USERDATA, (LONG_PTR)d);
-    ShowWindow(p, SW_SHOWNOACTIVATE);
-    SetCapture(p);
+void CVLWidget::sliderMouse(int x) {
+    CRect rc;
+    GetClientRect(&rc);
+    SliderGeo g = sliderGeo(this, rc);
+    double v = xToVal(this, x, g.x0, g.x1);
+    if (v != val) { val = v; Invalidate(FALSE); notify(EV_CHANGE); }
 }
 
-// ---------------- Mensajes del control ----------------
-static void sliderMouse(HWND h, Widget* w, int x) {
-    RECT rc;
-    GetClientRect(h, &rc);
-    SliderGeo g = sliderGeo(w, rc);
-    double v = xToVal(w, x, g.x0, g.x1);
-    if (v != w->val) { w->val = v; invalidateWidget(w); notify(w, EV_CHANGE); }
-}
-
-static void wheelMouse(HWND h, Widget* w, int x, int y) {
-    RECT rc;
-    GetClientRect(h, &rc);
+void CVLWidget::wheelMouse(int x, int y) {
+    CRect rc;
+    GetClientRect(&rc);
     WheelGeo g = wheelGeo(rc);
-    if (w->drag == 1) {
+    if (drag == 1) {
         double pr = g.R * 0.88;
         double dx = (x - g.cx) / pr, dy = -(y - g.cy) / pr;
         double len = std::sqrt(dx * dx + dy * dy);
         if (len > 1.0) { dx /= len; dy /= len; }
-        w->wx = dx;
-        w->wy = dy;
-        invalidateWidget(w);
-        notify(w, EV_CHANGE);
-    } else if (w->drag == 2) {
-        double v = xToVal(w, x, g.x0, g.x1);
-        w->val = v;
-        invalidateWidget(w);
-        notify(w, EV_CHANGE);
+        wx = dx;
+        wy = dy;
+        Invalidate(FALSE);
+        notify(EV_CHANGE);
+    } else if (drag == 2) {
+        val = xToVal(this, x, g.x0, g.x1);
+        Invalidate(FALSE);
+        notify(EV_CHANGE);
     }
 }
 
-static LRESULT CALLBACK WidgetProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
-    Widget* w = W(h);
-    switch (m) {
-    case WM_ERASEBKGND: return 1;
-    case WM_PAINT: paintWidget(h); return 0;
-    case WM_MOUSEMOVE: {
-        if (!w) break;
-        if (!w->hover) {
-            w->hover = true;
-            TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, h, 0 };
-            TrackMouseEvent(&t);
-            invalidateWidget(w);
-        }
-        if (w->down || w->drag) {
-            int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
-            if (w->type == WT_SLIDER) sliderMouse(h, w, x);
-            else if (w->type == WT_WHEEL) wheelMouse(h, w, x, y);
-        }
-        return 0;
+void CVLWidget::OnMouseMove(UINT, CPoint pt) {
+    if (!hover) {
+        hover = true;
+        TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, m_hWnd, 0 };
+        TrackMouseEvent(&t);
+        Invalidate(FALSE);
     }
-    case WM_MOUSELEAVE:
-        if (w) { w->hover = false; invalidateWidget(w); }
-        return 0;
-    case WM_LBUTTONDOWN:
-    case WM_LBUTTONDBLCLK: {
-        if (!w) break;
-        int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
-        bool dbl = (m == WM_LBUTTONDBLCLK);
-        switch (w->type) {
-        case WT_BUTTON:
-            w->down = true;
-            SetCapture(h);
-            invalidateWidget(w);
-            break;
-        case WT_TOGGLE:
-            w->checked = !w->checked;
-            invalidateWidget(w);
-            notify(w, EV_CLICK);
-            break;
-        case WT_DROP:
-            if (!w->items.empty()) openPopup(w);
-            break;
-        case WT_SLIDER:
-            notify(w, EV_BEGIN);
-            if (dbl) {
-                w->val = w->def;
-                invalidateWidget(w);
-                notify(w, EV_CHANGE);
-                notify(w, EV_END);
-            } else {
-                w->down = true;
-                SetCapture(h);
-                sliderMouse(h, w, x);
-            }
-            break;
-        case WT_WHEEL: {
-            RECT rc;
-            GetClientRect(h, &rc);
-            WheelGeo g = wheelGeo(rc);
-            bool onMaster = std::abs(y - g.ym) <= 9;
-            notify(w, EV_BEGIN);
-            if (dbl) {
-                if (onMaster) w->val = 0; else { w->wx = 0; w->wy = 0; }
-                invalidateWidget(w);
-                notify(w, EV_CHANGE);
-                notify(w, EV_END);
-            } else {
-                w->drag = onMaster ? 2 : 1;
-                w->down = true;
-                SetCapture(h);
-                wheelMouse(h, w, x, y);
-            }
-            break;
-        }
-        }
-        return 0;
+    if (down || drag) {
+        if (type == WT_SLIDER) sliderMouse(pt.x);
+        else if (type == WT_WHEEL) wheelMouse(pt.x, pt.y);
     }
-    case WM_LBUTTONUP: {
-        if (!w) break;
-        bool wasDown = w->down;
-        bool wasDrag = w->drag != 0;
-        w->down = false;
-        w->drag = 0;
-        if (GetCapture() == h) ReleaseCapture();
-        invalidateWidget(w);
-        if (w->type == WT_BUTTON && wasDown) {
-            RECT rc;
-            GetClientRect(h, &rc);
-            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-            if (PtInRect(&rc, pt)) notify(w, EV_CLICK);
-        } else if ((w->type == WT_SLIDER || w->type == WT_WHEEL) && (wasDown || wasDrag)) {
-            notify(w, EV_END);
+}
+
+void CVLWidget::OnMouseLeave() {
+    hover = false;
+    Invalidate(FALSE);
+}
+
+void CVLWidget::mouseDown(CPoint pt, bool dbl) {
+    switch (type) {
+    case WT_BUTTON:
+        down = true;
+        SetCapture();
+        Invalidate(FALSE);
+        break;
+    case WT_TOGGLE:
+        checked = !checked;
+        Invalidate(FALSE);
+        notify(EV_CLICK);
+        break;
+    case WT_DROP:
+        if (!items.empty()) openPopup();
+        break;
+    case WT_SLIDER:
+        notify(EV_BEGIN);
+        if (dbl) {
+            val = def;
+            Invalidate(FALSE);
+            notify(EV_CHANGE);
+            notify(EV_END);
+        } else {
+            down = true;
+            SetCapture();
+            sliderMouse(pt.x);
         }
-        return 0;
-    }
-    case WM_CAPTURECHANGED:
-        if (w && (w->down || w->drag) && (HWND)lp != h) { w->down = false; w->drag = 0; invalidateWidget(w); }
-        return 0;
-    case WM_ENABLE:
-        InvalidateRect(h, nullptr, FALSE);
-        return 0;
-    case WM_NCDESTROY:
-        if (w && w->wheelBmp) { DeleteObject(w->wheelBmp); w->wheelBmp = nullptr; }
+        break;
+    case WT_WHEEL: {
+        CRect rc;
+        GetClientRect(&rc);
+        WheelGeo g = wheelGeo(rc);
+        bool onMaster = std::abs(pt.y - g.ym) <= 9;
+        notify(EV_BEGIN);
+        if (dbl) {
+            if (onMaster) val = 0; else { wx = 0; wy = 0; }
+            Invalidate(FALSE);
+            notify(EV_CHANGE);
+            notify(EV_END);
+        } else {
+            drag = onMaster ? 2 : 1;
+            down = true;
+            SetCapture();
+            wheelMouse(pt.x, pt.y);
+        }
         break;
     }
-    return DefWindowProcW(h, m, wp, lp);
+    }
 }
 
-void registerWidgetClasses(HINSTANCE inst) {
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_DBLCLKS;
-    wc.lpfnWndProc = WidgetProc;
-    wc.hInstance = inst;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.lpszClassName = kWidgetClass;
-    RegisterClassExW(&wc);
-
-    WNDCLASSEXW pc{};
-    pc.cbSize = sizeof(pc);
-    pc.style = CS_DROPSHADOW;
-    pc.lpfnWndProc = PopupProc;
-    pc.hInstance = inst;
-    pc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    pc.lpszClassName = kPopupClass;
-    RegisterClassExW(&pc);
+void CVLWidget::OnLButtonUp(UINT, CPoint pt) {
+    bool wasDown = down;
+    bool wasDrag = drag != 0;
+    down = false;
+    drag = 0;
+    if (GetCapture() == this) ReleaseCapture();
+    Invalidate(FALSE);
+    if (type == WT_BUTTON && wasDown) {
+        CRect rc;
+        GetClientRect(&rc);
+        if (rc.PtInRect(pt)) notify(EV_CLICK);
+    } else if ((type == WT_SLIDER || type == WT_WHEEL) && (wasDown || wasDrag)) {
+        notify(EV_END);
+    }
 }
 
-Widget* createWidget(HWND parent, WType type, int id, const wchar_t* text) {
-    auto w = std::make_unique<Widget>();
+void CVLWidget::OnCaptureChanged(CWnd* wnd) {
+    if ((down || drag) && wnd != this) { down = false; drag = 0; Invalidate(FALSE); }
+    CWnd::OnCaptureChanged(wnd);
+}
+
+// ---------------- Desplegable: ventana emergente (CVLPopup) ----------------
+class CVLPopup : public CWnd {
+public:
+    explicit CVLPopup(CVLWidget* owner) : w_(owner), hot_(owner->sel) {}
+    BOOL Open(const CRect& r);
+
+protected:
+    afx_msg BOOL OnEraseBkgnd(CDC*) { return TRUE; }
+    afx_msg void OnPaint();
+    afx_msg void OnMouseMove(UINT flags, CPoint pt);
+    afx_msg void OnLButtonDown(UINT flags, CPoint pt);
+    afx_msg void OnCaptureChanged(CWnd* wnd);
+    void PostNcDestroy() override { delete this; }   // la ventana emergente se libera sola
+    DECLARE_MESSAGE_MAP()
+
+public:
+    static const int kItemH = 26;
+
+private:
+    CVLWidget* w_;
+    int hot_;
+    bool closing_ = false;
+};
+
+BEGIN_MESSAGE_MAP(CVLPopup, CWnd)
+    ON_WM_ERASEBKGND()
+    ON_WM_PAINT()
+    ON_WM_MOUSEMOVE()
+    ON_WM_LBUTTONDOWN()
+    ON_WM_CAPTURECHANGED()
+END_MESSAGE_MAP()
+
+BOOL CVLPopup::Open(const CRect& r) {
+    static const std::wstring cls = AfxRegisterWndClass(CS_DROPSHADOW, ::LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr);
+    if (!CreateEx(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, cls.c_str(), L"", WS_POPUP,
+                  r.left, r.top, r.Width(), r.Height(), w_->GetParent()->GetSafeHwnd(), nullptr))
+        return FALSE;
+    ShowWindow(SW_SHOWNOACTIVATE);
+    SetCapture();
+    return TRUE;
+}
+
+void CVLPopup::OnMouseMove(UINT, CPoint pt) {
+    int idx = pt.y / kItemH;
+    if (idx != hot_) { hot_ = idx; Invalidate(FALSE); }
+}
+
+void CVLPopup::OnLButtonDown(UINT, CPoint pt) { // el soltar del clic que abrio el menu se ignora a proposito
+    if (closing_) return;
+    CRect rc;
+    GetClientRect(&rc);
+    int idx = pt.y / kItemH;
+    CVLWidget* w = w_;
+    bool ok = rc.PtInRect(pt) && idx >= 0 && idx < (int)w->items.size();
+    closing_ = true;
+    ReleaseCapture();
+    DestroyWindow();                 // 'this' se borra en PostNcDestroy: no usar miembros despues
+    if (ok) {
+        w->sel = idx;
+        invalidateWidget(w);
+        w->notify(EV_CLICK);
+    }
+}
+
+void CVLPopup::OnCaptureChanged(CWnd* wnd) {
+    if (!closing_) { closing_ = true; DestroyWindow(); }
+}
+
+void CVLPopup::OnPaint() {
+    CPaintDC dc(this);
+    CRect rc;
+    GetClientRect(&rc);
+    fillRc(&dc, rc, Theme::field);
+    for (int i = 0; i < (int)w_->items.size(); ++i) {
+        RECT ir{ rc.left + 2, i * kItemH + 2, rc.right - 2, (i + 1) * kItemH };
+        if (i == hot_) fillRc(&dc, ir, Theme::blue);
+        RECT tr{ ir.left + 22, ir.top, ir.right - 6, ir.bottom };
+        textIn(&dc, tr, w_->items[i], i == hot_ ? RGB(255, 255, 255) : Theme::text,
+               DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
+        if (i == w_->sel) {
+            int cy = (ir.top + ir.bottom) / 2;
+            COLORREF ck = i == hot_ ? RGB(255, 255, 255) : Theme::blue;
+            lineTo(&dc, ir.left + 7, cy, ir.left + 10, cy + 3, ck, 2);
+            lineTo(&dc, ir.left + 10, cy + 3, ir.left + 15, cy - 3, ck, 2);
+        }
+    }
+    CPen bp(PS_SOLID, 1, Theme::border);
+    CPen* op = dc.SelectObject(&bp);
+    CGdiObject* ob = dc.SelectStockObject(NULL_BRUSH);
+    dc.Rectangle(&rc);
+    dc.SelectObject(ob);
+    dc.SelectObject(op);
+}
+
+void CVLWidget::openPopup() {
+    CRect wr;
+    GetWindowRect(&wr);
+    int count = (int)items.size();
+    int width = std::max<int>(wr.Width(), 150);
+    int height = count * CVLPopup::kItemH + 4;
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfo(MonitorFromWindow(m_hWnd, MONITOR_DEFAULTTONEAREST), &mi);
+    int x = std::min<int>(wr.left, mi.rcWork.right - width);
+    int y = wr.bottom;
+    if (y + height > mi.rcWork.bottom) y = wr.top - height;
+    CVLPopup* p = new CVLPopup(this);   // se borra solo en PostNcDestroy al cerrarse
+    p->Open(CRect(x, y, x + width, y + height));
+}
+
+// ---------------- Fabrica ----------------
+CVLWidget* createWidget(CWnd* parent, WType type, int id, const wchar_t* text) {
+    auto w = std::make_unique<CVLWidget>();
     w->type = type;
     w->id = id;
     w->text = text ? text : L"";
-    w->hwnd = CreateWindowExW(0, kWidgetClass, L"", WS_CHILD, 0, 0, 10, 10, parent, nullptr,
-                              GetModuleHandleW(nullptr), nullptr);
-    SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)w.get());
-    Widget* raw = w.get();
+    w->CreateWidget(parent);
+    CVLWidget* raw = w.get();
     g_widgets.push_back(std::move(w));
     return raw;
 }

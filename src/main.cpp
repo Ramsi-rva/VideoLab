@@ -85,8 +85,7 @@ static std::wstring g_outPath;
 static bool         g_lastExportOk = false;
 
 static CEdit  g_editCtl;      // control MFC del inspector (texto del titulo)
-static HWND   g_edit = nullptr;
-static HBRUSH g_editBrush = nullptr;
+static CBrush g_editBrush;     // fondo del CEdit con el tema oscuro
 static Widget* g_w[CID_MAX] = {};
 static Widget* wd(int id) { return g_w[id]; }
 
@@ -107,11 +106,11 @@ static const ColorEntry kColors[] = {
 static const COLORREF kClipColors[] = {
     RGB(58, 110, 165), RGB(150, 86, 78), RGB(78, 135, 92), RGB(152, 124, 58), RGB(112, 86, 150), RGB(52, 132, 140) };
 
-static void afterEdit(HWND hwnd);
-static void renderPreview(HWND hwnd);
-static void layoutAll(HWND hwnd);
+static void afterEdit(CWnd* wnd);
+static void renderPreview(CWnd* wnd);
+static void layoutAll(CWnd* wnd);
 static void syncInspector();
-static void startAudio(HWND hwnd);
+static void startAudio(CWnd* wnd);
 
 // ---------------- Utilidades ----------------
 static std::string toUtf8(const std::wstring& w) {
@@ -145,17 +144,17 @@ static std::wstring fmtTC(double s) {
     wfmt(b, L"%02d:%02d:%02d:%02d", (int)(ts / 3600), (int)((ts / 60) % 60), (int)(ts % 60), ff);
     return b;
 }
-static int msgBox(HWND owner, const wchar_t* text, const wchar_t* title, UINT flags) {
-    CWnd* w = owner ? CWnd::FromHandle(owner) : AfxGetMainWnd();
-    return w ? w->MessageBox(text, title, flags) : ::MessageBoxW(nullptr, text, title, flags);
+static int msgBox(CWnd* owner, const wchar_t* text, const wchar_t* title, UINT flags) {
+    CWnd* w = owner ? owner : AfxGetMainWnd();
+    return w ? w->MessageBox(text, title, flags) : AfxMessageBox(text, flags);
 }
 // 'filter' usa el formato Win32 "Descripcion\0*.ext\0\0"; se convierte al formato de MFC "Desc|*.ext||".
-static bool pickFile(HWND owner, bool save, const wchar_t* filter, const wchar_t* defExt, std::wstring& out) {
+static bool pickFile(CWnd* owner, bool save, const wchar_t* filter, const wchar_t* defExt, std::wstring& out) {
     CString flt;
     for (const wchar_t* p = filter; *p; p += wcslen(p) + 1) { flt += p; flt += L'|'; }
     flt += L'|';
     DWORD flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
-    CFileDialog dlg(save ? FALSE : TRUE, defExt, nullptr, flags, flt, owner ? CWnd::FromHandle(owner) : nullptr);
+    CFileDialog dlg(save ? FALSE : TRUE, defExt, nullptr, flags, flt, owner);
     if (dlg.DoModal() != IDOK) return false;
     out = dlg.GetPathName().GetString();
     return true;
@@ -191,19 +190,19 @@ static void restoreSnapshot(const Snapshot& s) {
     g_selText = s.selText;
     g_selAudio = s.selAudio;
 }
-static void doUndo(HWND hwnd) {
+static void doUndo(CWnd* wnd) {
     if (g_undo.empty()) return;
     g_redo.push_back(takeSnapshot());
     restoreSnapshot(g_undo.back());
     g_undo.pop_back();
-    afterEdit(hwnd);
+    afterEdit(wnd);
 }
-static void doRedo(HWND hwnd) {
+static void doRedo(CWnd* wnd) {
     if (g_redo.empty()) return;
     g_undo.push_back(takeSnapshot());
     restoreSnapshot(g_redo.back());
     g_redo.pop_back();
-    afterEdit(hwnd);
+    afterEdit(wnd);
 }
 
 // ---------------- Linea de tiempo: geometria ----------------
@@ -278,8 +277,8 @@ static Hit hitTest(int mx, int my) {
 }
 
 // ---------------- Invalidacion y vista previa ----------------
-static void invalidateTimeline(HWND hwnd) { InvalidateRect(hwnd, &g_rcTimeline, FALSE); }
-static void invalidateBar(HWND hwnd) { InvalidateRect(hwnd, &g_rcPageBar, FALSE); }
+static void invalidateTimeline(CWnd* wnd) { wnd->InvalidateRect(&g_rcTimeline, FALSE); }
+static void invalidateBar(CWnd* wnd) { wnd->InvalidateRect(&g_rcPageBar, FALSE); }
 
 // Dibuja la forma de onda completa del audio en un lienzo (para medios que solo tienen audio).
 static void makeWaveImage(const AudioSource& as, Canvas& cv) {
@@ -322,29 +321,29 @@ static void refreshSourcePreview() {
     r.render(tp, std::min(0.5, tp.media[0].duration * 0.5), g_srcCanvas);
 }
 
-static void renderPreview(HWND hwnd) {
+static void renderPreview(CWnd* wnd) {
     g_renderer.render(g_project, g_playhead, g_canvas);
     if (g_page == PG_COLOR) {
         renderScope(g_scopeMode, g_canvas.bits, g_canvas.w, g_canvas.h, g_scopeCanvas);
-        InvalidateRect(hwnd, &g_rcScope, FALSE);
+        wnd->InvalidateRect(&g_rcScope, FALSE);
     }
-    InvalidateRect(hwnd, &g_rcViewer, FALSE);
+    wnd->InvalidateRect(&g_rcViewer, FALSE);
 }
 
-static void setPlayhead(HWND hwnd, double t) {
+static void setPlayhead(CWnd* wnd, double t) {
     g_playhead = std::clamp(t, 0.0, g_project.duration());
     if (g_playing) {
         g_playStartT = g_playhead;
         g_playStartTick = GetTickCount64();
         if (g_engine.running()) g_engine.restart(g_playhead);
     }
-    renderPreview(hwnd);
-    invalidateTimeline(hwnd);
+    renderPreview(wnd);
+    invalidateTimeline(wnd);
 }
 
 // Arranca / reinicia / detiene el audio segun el proyecto (el reloj de audio manda mientras suena).
-static void startAudio(HWND hwnd) {
-    (void)hwnd;
+static void startAudio(CWnd* wnd) {
+    (void)wnd;
     if (!g_project.hasAudio()) {
         if (g_engine.running()) {   // se quedo sin audio: volver al reloj normal
             g_engine.stop();
@@ -357,28 +356,28 @@ static void startAudio(HWND hwnd) {
     else if (!g_engine.start(&g_project, &g_bank, g_playhead)) g_msg = L"No se pudo abrir el dispositivo de audio.";
 }
 
-static void stopPlay(HWND hwnd) {
+static void stopPlay(CWnd* wnd) {
     g_engine.stop();
     g_playing = false;
-    KillTimer(hwnd, CID_TIMER);
+    wnd->KillTimer(CID_TIMER);
     wd(CID_PLAY)->icon = IC_PLAY;
     invalidateWidget(wd(CID_PLAY));
 }
-static void togglePlay(HWND hwnd) {
-    if (g_playing) { stopPlay(hwnd); return; }
+static void togglePlay(CWnd* wnd) {
+    if (g_playing) { stopPlay(wnd); return; }
     double dur = g_project.duration();
     if (dur <= 0.0) return;
     if (g_playhead >= dur - 0.01) g_playhead = 0.0;
     g_playing = true;
     g_playStartT = g_playhead;
     g_playStartTick = GetTickCount64();
-    startAudio(hwnd);
-    SetTimer(hwnd, CID_TIMER, 15, nullptr);
+    startAudio(wnd);
+    wnd->SetTimer(CID_TIMER, 15, nullptr);
     wd(CID_PLAY)->icon = IC_PAUSE;
     invalidateWidget(wd(CID_PLAY));
 }
 
-static void jumpEdit(HWND hwnd, int dir) { // salto al punto de edicion anterior / siguiente
+static void jumpEdit(CWnd* wnd, int dir) { // salto al punto de edicion anterior / siguiente
     std::vector<double> pts{ 0.0 };
     double s = 0;
     for (const auto& c : g_project.clips) { s += c.duration(); pts.push_back(s); }
@@ -386,15 +385,15 @@ static void jumpEdit(HWND hwnd, int dir) { // salto al punto de edicion anterior
     std::sort(pts.begin(), pts.end());
     const double eps = 0.02;
     if (dir > 0) {
-        for (double p : pts) if (p > g_playhead + eps) { setPlayhead(hwnd, p); followPlayhead(); return; }
+        for (double p : pts) if (p > g_playhead + eps) { setPlayhead(wnd, p); followPlayhead(); return; }
     } else {
         for (int i = (int)pts.size() - 1; i >= 0; --i)
-            if (pts[i] < g_playhead - eps) { setPlayhead(hwnd, pts[i]); followPlayhead(); return; }
+            if (pts[i] < g_playhead - eps) { setPlayhead(wnd, pts[i]); followPlayhead(); return; }
     }
 }
 
 // ---------------- Operaciones de edicion ----------------
-static void addClip(HWND hwnd, int mediaIdx) {
+static void addClip(CWnd* wnd, int mediaIdx) {
     if (mediaIdx < 0 || mediaIdx >= (int)g_project.media.size()) return;
     if (!g_project.media[mediaIdx].hasVideo) return;
     pushUndo();
@@ -409,11 +408,11 @@ static void addClip(HWND hwnd, int mediaIdx) {
     g_playhead = start;
     g_msg = L"Clip agregado a la línea de tiempo.";
     followPlayhead();
-    afterEdit(hwnd);
+    afterEdit(wnd);
 }
 
 // Agrega el audio de un medio a la pista A1 (o A2 si A1 esta ocupada) en la posicion del cabezal.
-static void addAudio(HWND hwnd, int mediaIdx) {
+static void addAudio(CWnd* wnd, int mediaIdx) {
     if (mediaIdx < 0 || mediaIdx >= (int)g_project.media.size() || !g_bank.get(mediaIdx)) return;
     pushUndo();
     AudioClip a;
@@ -431,16 +430,16 @@ static void addAudio(HWND hwnd, int mediaIdx) {
     g_selAudio = (int)g_project.audio.size() - 1;
     g_selClip = g_selText = -1;
     g_msg = L"Audio agregado a la pista A" + std::wstring(a.track == 0 ? L"1" : L"2") + L".";
-    afterEdit(hwnd);
+    afterEdit(wnd);
 }
 
-static bool importFile(HWND hwnd, const std::wstring& path) {
+static bool importFile(CWnd* wnd, const std::wstring& path) {
     const std::string u8 = toUtf8(path);
     std::string err;
     StreamInfo si;
     if (!probeStreams(u8, si, err) || (!si.hasVideo && !si.hasAudio)) {
         if (err.empty()) err = "El archivo no contiene video ni audio.";
-        msgBox(hwnd, (toWide(err) + L"\n" + path).c_str(), L"VideoLab", MB_ICONERROR);
+        msgBox(wnd, (toWide(err) + L"\n" + path).c_str(), L"VideoLab", MB_ICONERROR);
         return false;
     }
 
@@ -457,7 +456,7 @@ static bool importFile(HWND hwnd, const std::wstring& path) {
         SetCursor(oldCur);
         if (!ok) {
             if (!si.hasVideo) {
-                msgBox(hwnd, (toWide(err) + L"\n" + path).c_str(), L"VideoLab", MB_ICONERROR);
+                msgBox(wnd, (toWide(err) + L"\n" + path).c_str(), L"VideoLab", MB_ICONERROR);
                 return false;
             }
             as.reset();   // video cuyo audio no se pudo leer: se usa solo el video
@@ -468,7 +467,7 @@ static bool importFile(HWND hwnd, const std::wstring& path) {
     if (si.hasVideo) {
         MediaSource ms;
         if (!ms.open(u8, err)) {
-            msgBox(hwnd, (toWide(err) + L"\n" + path).c_str(), L"VideoLab", MB_ICONERROR);
+            msgBox(wnd, (toWide(err) + L"\n" + path).c_str(), L"VideoLab", MB_ICONERROR);
             return false;
         }
         mi.hasVideo = true;
@@ -497,31 +496,31 @@ static bool importFile(HWND hwnd, const std::wstring& path) {
     g_selMedia = idx;
     g_msg = L"Importado: " + mi.name;
     if (g_page == PG_MEDIA) refreshSourcePreview();
-    if (!mi.hasVideo) addAudio(hwnd, idx);                       // un audio suelto va directo a la pista A1/A2
-    else if (g_project.clips.empty()) addClip(hwnd, idx);
-    else afterEdit(hwnd);
+    if (!mi.hasVideo) addAudio(wnd, idx);                       // un audio suelto va directo a la pista A1/A2
+    else if (g_project.clips.empty()) addClip(wnd, idx);
+    else afterEdit(wnd);
     return true;
 }
 
-static void doImport(HWND hwnd) {
+static void doImport(CWnd* wnd) {
     std::wstring path;
-    if (pickFile(hwnd, false,
+    if (pickFile(wnd, false,
                  L"Videos y audio\0*.mp4;*.avi;*.mkv;*.mov;*.webm;*.wmv;*.m4v;*.mp3;*.wav;*.aac;*.flac;*.ogg;*.m4a;*.wma;*.opus\0"
                  L"Videos\0*.mp4;*.avi;*.mkv;*.mov;*.webm;*.wmv;*.m4v\0"
                  L"Audio\0*.mp3;*.wav;*.aac;*.flac;*.ogg;*.m4a;*.wma;*.opus\0"
                  L"Todos los archivos\0*.*\0",
                  nullptr, path))
-        importFile(hwnd, path);
+        importFile(wnd, path);
 }
 
-static void doSplit(HWND hwnd) {
+static void doSplit(CWnd* wnd) {
     if (selAudio()) {   // dividir el clip de audio seleccionado
         int i = g_selAudio;
         AudioClip a = g_project.audio[i];
         double local = g_playhead - a.start;
         if (local < 0.1 || a.duration() - local < 0.1) {
             g_msg = L"Coloca el cabezal dentro del clip de audio para dividirlo.";
-            invalidateBar(hwnd);
+            invalidateBar(wnd);
             return;
         }
         pushUndo();
@@ -535,7 +534,7 @@ static void doSplit(HWND hwnd) {
         g_project.audio.insert(g_project.audio.begin() + i + 1, b);
         g_selAudio = i + 1;
         g_msg = L"Audio dividido.";
-        afterEdit(hwnd);
+        afterEdit(wnd);
         return;
     }
     double local = 0.0;
@@ -544,7 +543,7 @@ static void doSplit(HWND hwnd) {
     Clip c = g_project.clips[i];
     if (local < 0.1 || c.duration() - local < 0.1) {
         g_msg = L"Coloca el cabezal dentro de un clip para dividirlo.";
-        invalidateBar(hwnd);
+        invalidateBar(wnd);
         return;
     }
     pushUndo();
@@ -557,10 +556,10 @@ static void doSplit(HWND hwnd) {
     g_selClip = i + 1;
     g_selText = g_selAudio = -1;
     g_msg = L"Clip dividido.";
-    afterEdit(hwnd);
+    afterEdit(wnd);
 }
 
-static void doDelete(HWND hwnd) {
+static void doDelete(CWnd* wnd) {
     if (selClip()) {
         pushUndo();
         g_project.clips.erase(g_project.clips.begin() + g_selClip);
@@ -574,30 +573,30 @@ static void doDelete(HWND hwnd) {
         g_project.audio.erase(g_project.audio.begin() + g_selAudio);
         g_selAudio = -1;
     } else return;
-    afterEdit(hwnd);
+    afterEdit(wnd);
 }
 
-static void doAddText(HWND hwnd) {
+static void doAddText(CWnd* wnd) {
     pushUndo();
     TextItem t;
     t.start = g_playhead;
     g_project.texts.push_back(t);
     g_selText = (int)g_project.texts.size() - 1;
     g_selClip = g_selAudio = -1;
-    afterEdit(hwnd);
+    afterEdit(wnd);
     g_editUndoPending = false;
-    SetFocus(g_edit);
-    SendMessageW(g_edit, EM_SETSEL, 0, -1);
+    g_editCtl.SetFocus();
+    g_editCtl.SetSel(0, -1);
 }
 
-static void doExport(HWND hwnd) {
+static void doExport(CWnd* wnd) {
     if (g_exporting) { g_cancel = true; return; }
     if (g_project.duration() <= 0.0) {
-        msgBox(hwnd, L"Agrega al menos un clip de video o de audio a la línea de tiempo antes de renderizar.", L"VideoLab", MB_ICONINFORMATION);
+        msgBox(wnd, L"Agrega al menos un clip de video o de audio a la línea de tiempo antes de renderizar.", L"VideoLab", MB_ICONINFORMATION);
         return;
     }
-    if (g_outPath.empty() && !pickFile(hwnd, true, L"Video MP4\0*.mp4\0", L"mp4", g_outPath)) return;
-    stopPlay(hwnd);
+    if (g_outPath.empty() && !pickFile(wnd, true, L"Video MP4\0*.mp4\0", L"mp4", g_outPath)) return;
+    stopPlay(wnd);
 
     static const int kRes[3][2] = { { 854, 480 }, { 1280, 720 }, { 1920, 1080 } };
     static const int kFps[4] = { 24, 25, 30, 60 };
@@ -615,17 +614,18 @@ static void doExport(HWND hwnd) {
     wd(CID_RENDER)->text = L"Cancelar";
     invalidateWidget(wd(CID_RENDER));
     g_msg = L"Renderizando...";
-    InvalidateRect(hwnd, &g_rcQueue, FALSE);
-    invalidateBar(hwnd);
+    wnd->InvalidateRect(&g_rcQueue, FALSE);
+    invalidateBar(wnd);
 
     std::string utf8 = toUtf8(g_outPath);
     AudioBank bank = g_bank;   // copia (comparte los buffers de audio, que no cambian)
-    g_worker = std::thread([hwnd, snap, bank, utf8]() {
+    HWND target = wnd->GetSafeHwnd();   // el hilo de render solo usa el handle para PostMessage
+    g_worker = std::thread([target, snap, bank, utf8]() {
         std::string err;
         bool ok = exportProject(snap, bank, utf8, g_cancel,
-                                [hwnd](int pct) { PostMessageW(hwnd, WM_EXPORT_PROGRESS, (WPARAM)pct, 0); }, err);
+                                [target](int pct) { ::PostMessage(target, WM_EXPORT_PROGRESS, (WPARAM)pct, 0); }, err);
         g_exportErr = err;
-        PostMessageW(hwnd, WM_EXPORT_DONE, ok ? 1 : 0, 0);
+        ::PostMessage(target, WM_EXPORT_DONE, ok ? 1 : 0, 0);
     });
 }
 
@@ -652,7 +652,7 @@ static void syncInspector() {
         int ti = 0;
         for (int i = 0; i < 3; ++i) if (std::fabs(kTransDurs[i] - c->transDur) < 0.001) ti = i;
         setSel(CID_TRANSDUR, ti);
-        EnableWindow(wd(CID_TRANSDUR)->hwnd, c->trans != Trans::None);
+        wd(CID_TRANSDUR)->EnableWindow(c->trans != Trans::None);
         const Wheel* ws[3] = { &c->lift, &c->gamma, &c->gain };
         for (int k = 0; k < 3; ++k) {
             Widget* w = g_w[CID_WH_LIFT + k];
@@ -666,7 +666,7 @@ static void syncInspector() {
         wd(CID_A_MUTE)->checked = a->mute;
         invalidateWidget(wd(CID_A_MUTE));
     } else if (TextItem* t = selText()) {
-        SetWindowTextW(g_edit, t->text.c_str());
+        g_editCtl.SetWindowText(t->text.c_str());
         setS(CID_TXT_SIZE, t->size);
         setS(CID_TXT_X, std::lround(t->x * 100));
         setS(CID_TXT_Y, std::lround(t->y * 100));
@@ -682,7 +682,7 @@ static void syncInspector() {
 static void updateEnable() {
     bool hasDur = g_project.duration() > 0.0;
     bool clip = selClip() != nullptr, text = selText() != nullptr;
-    auto en = [](int id, bool on) { EnableWindow(g_w[id]->hwnd, on ? TRUE : FALSE); };
+    auto en = [](int id, bool on) { g_w[id]->EnableWindow(on ? TRUE : FALSE); };
     en(CID_PLAY, hasDur); en(CID_HOME, hasDur); en(CID_END, hasDur);
     bool aud = selAudio() != nullptr;
     en(CID_SPLIT, !g_project.clips.empty() || aud);
@@ -699,24 +699,24 @@ static void updateEnable() {
     en(CID_TRANSDUR, clip && selClip()->trans != Trans::None);
 }
 
-static void afterEdit(HWND hwnd) {
+static void afterEdit(CWnd* wnd) {
     double dur = g_project.duration();
     g_playhead = std::clamp(g_playhead, 0.0, dur);
     if (g_selClip >= (int)g_project.clips.size()) g_selClip = -1;
     if (g_selText >= (int)g_project.texts.size()) g_selText = -1;
     if (g_selAudio >= (int)g_project.audio.size()) g_selAudio = -1;
-    if (g_playing && dur <= 0.0) stopPlay(hwnd);
-    else if (g_playing) startAudio(hwnd);
+    if (g_playing && dur <= 0.0) stopPlay(wnd);
+    else if (g_playing) startAudio(wnd);
     syncInspector();
     updateEnable();
-    layoutAll(hwnd);
+    layoutAll(wnd);
     clampScroll();
-    renderPreview(hwnd);
-    InvalidateRect(hwnd, nullptr, FALSE);
+    renderPreview(wnd);
+    wnd->InvalidateRect(nullptr, FALSE);
 }
 
 // ---------------- Paginas ----------------
-static void setPage(HWND hwnd, int p) {
+static void setPage(CWnd* wnd, int p) {
     if (p == g_page) return;
     g_page = p;
     if (p == PG_COLOR && !selClip() && !g_project.clips.empty()) {
@@ -728,9 +728,9 @@ static void setPage(HWND hwnd, int p) {
     if (p == PG_MEDIA) refreshSourcePreview();
     syncInspector();
     updateEnable();
-    layoutAll(hwnd);
-    renderPreview(hwnd);
-    InvalidateRect(hwnd, nullptr, FALSE);
+    layoutAll(wnd);
+    renderPreview(wnd);
+    wnd->InvalidateRect(nullptr, FALSE);
 }
 
 static RECT tabRect(int i) {
@@ -742,7 +742,7 @@ static RECT tabRect(int i) {
 // ---------------- Layout ----------------
 static void place(int id, int x, int y, int w, int h) {
     Widget* wg = g_w[id];
-    MoveWindow(wg->hwnd, x, y, w, h, TRUE);
+    wg->MoveWindow(x, y, w, h, TRUE);
     wg->want = true;
 }
 
@@ -809,9 +809,9 @@ static void section(int& y, const wchar_t* title) {
     y += 24;
 }
 
-static void layoutAll(HWND hwnd) {
+static void layoutAll(CWnd* wnd) {
     RECT rc;
-    GetClientRect(hwnd, &rc);
+    wnd->GetClientRect(&rc);
     int W = rc.right, H = rc.bottom;
     if (W <= 0 || H <= 0) return;
     computeRects(W, H);
@@ -855,7 +855,7 @@ static void layoutAll(HWND hwnd) {
             place(CID_A_MUTE, ix, iy, iw, 26);
         } else if (selText()) {
             section(iy, L"TÍTULO");
-            MoveWindow(g_edit, ix, iy, iw, 64, TRUE);
+            g_editCtl.MoveWindow(ix, iy, iw, 64, TRUE);
             wantEdit = true;
             iy += 74;
             section(iy, L"ESTILO");
@@ -895,23 +895,23 @@ static void layoutAll(HWND hwnd) {
 
     // mostrar / ocultar segun corresponda
     for (auto& w : allWidgets()) {
-        bool vis = IsWindowVisible(w->hwnd) != FALSE;
-        if (w->want != vis) ShowWindow(w->hwnd, w->want ? SW_SHOWNA : SW_HIDE);
+        bool vis = w->IsWindowVisible() != FALSE;
+        if (w->want != vis) w->ShowWindow(w->want ? SW_SHOWNA : SW_HIDE);
     }
-    bool ev = IsWindowVisible(g_edit) != FALSE;
-    if (wantEdit != ev) ShowWindow(g_edit, wantEdit ? SW_SHOWNA : SW_HIDE);
+    bool ev = g_editCtl.IsWindowVisible() != FALSE;
+    if (wantEdit != ev) g_editCtl.ShowWindow(wantEdit ? SW_SHOWNA : SW_HIDE);
     clampScroll();
 }
 
 // ---------------- VISTA: dibujo ----------------
-static void panelHeader(HDC dc, const RECT& r, const wchar_t* title) {
+static void panelHeader(CDC* dc, const RECT& r, const wchar_t* title) {
     RECT h{ r.left, r.top, r.right, r.top + HEAD_H };
     fillRc(dc, h, Theme::header);
     lineTo(dc, r.left, h.bottom - 1, r.right, h.bottom - 1, Theme::line);
     textIn(dc, { r.left + 12, h.top, r.right - 8, h.bottom }, title, Theme::text, DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fBold);
 }
 
-static void drawTitleBar(HDC dc) {
+static void drawTitleBar(CDC* dc) {
     if (!inv(g_rcTitle)) return;
     fillRc(dc, g_rcTitle, Theme::header);
     lineTo(dc, 0, g_rcTitle.bottom - 1, g_rcTitle.right, g_rcTitle.bottom - 1, Theme::line);
@@ -925,7 +925,7 @@ static void drawTitleBar(HDC dc) {
     textIn(dc, { 0, 0, g_rcTitle.right - 14, TITLE_H - 1 }, b, Theme::textDim, DT_RIGHT | DT_VCENTER | DT_SINGLELINE, fUI);
 }
 
-static void drawPageBar(HDC dc, int W) {
+static void drawPageBar(CDC* dc, int W) {
     if (!inv(g_rcPageBar)) return;
     fillRc(dc, g_rcPageBar, Theme::header);
     lineTo(dc, 0, g_rcPageBar.top, W, g_rcPageBar.top, Theme::line);
@@ -949,7 +949,7 @@ static void drawPageBar(HDC dc, int W) {
            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, fUI);
 }
 
-static void drawViewer(HDC dc) {
+static void drawViewer(CDC* dc) {
     if (rw(g_rcViewer) <= 0 || !inv(g_rcViewer)) return;
     fillRc(dc, g_rcViewer, Theme::panel);
     bool src = (g_page == PG_MEDIA);
@@ -965,9 +965,9 @@ static void drawViewer(HDC dc) {
         double s = std::min((double)aw / cv.w, (double)ah / cv.h);
         int dw = (int)(cv.w * s), dh = (int)(cv.h * s);
         int dx = img.left + (rw(img) - dw) / 2, dy = img.top + (rh(img) - dh) / 2;
-        SetStretchBltMode(dc, HALFTONE);
-        SetBrushOrgEx(dc, 0, 0, nullptr);
-        StretchBlt(dc, dx, dy, dw, dh, cv.dc, 0, 0, cv.w, cv.h, SRCCOPY);
+        dc->SetStretchBltMode(HALFTONE);
+        dc->SetBrushOrg(0, 0);
+        dc->StretchBlt(dx, dy, dw, dh, CDC::FromHandle(cv.dc), 0, 0, cv.w, cv.h, SRCCOPY);
         if (!src && g_project.clips.empty() && g_project.texts.empty() && g_project.audio.empty()) {
             textIn(dc, { dx, dy, dx + dw, dy + dh }, L"Importa un video o un audio para comenzar\n(Ctrl+I o arrastra un archivo aquí)",
                    Theme::textDim, DT_CENTER | DT_VCENTER, fUI);
@@ -1026,15 +1026,15 @@ static void clampPoolScroll() {
     g_poolScroll = std::clamp(g_poolScroll, 0, std::max(0, content - rh(g)));
 }
 
-static void drawPool(HDC dc) {
+static void drawPool(CDC* dc) {
     if (rw(g_rcPool) <= 0 || !inv(g_rcPool)) return;
     fillRc(dc, g_rcPool, Theme::panel);
     panelHeader(dc, g_rcPool, L"Medios");
     lineTo(dc, g_rcPool.right - 1, g_rcPool.top, g_rcPool.right - 1, g_rcPool.bottom, Theme::line);
 
     RECT g = poolGrid();
-    int saved = SaveDC(dc);
-    IntersectClipRect(dc, g.left, g.top, g.right - 1, g.bottom);
+    int saved = dc->SaveDC();
+    dc->IntersectClipRect(g.left, g.top, g.right - 1, g.bottom);
     if (g_project.media.empty()) {
         textIn(dc, { g.left + 16, g.top + 30, g.right - 16, g.top + 120 },
                L"No hay medios.\nUsa \"Importar medios\" o arrastra videos y audios a esta ventana.", Theme::textDim, DT_CENTER | DT_WORDBREAK, fUI);
@@ -1047,18 +1047,17 @@ static void drawPool(HDC dc) {
         RECT th{ r.left, r.top, r.right, r.top + (rw(r) * 9 / 16) };
         fillRc(dc, th, RGB(10, 10, 12));
         if (i < (int)g_thumbs.size() && g_thumbs[i] && g_thumbs[i]->dc) {
-            SetStretchBltMode(dc, HALFTONE);
-            SetBrushOrgEx(dc, 0, 0, nullptr);
-            StretchBlt(dc, th.left, th.top, rw(th), rh(th), g_thumbs[i]->dc, 0, 0, THUMB_W, THUMB_H, SRCCOPY);
+            dc->SetStretchBltMode(HALFTONE);
+            dc->SetBrushOrg(0, 0);
+            dc->StretchBlt(th.left, th.top, rw(th), rh(th), CDC::FromHandle(g_thumbs[i]->dc), 0, 0, THUMB_W, THUMB_H, SRCCOPY);
         }
         if (sel) {
-            HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
-            HPEN sp = CreatePen(PS_SOLID, 2, Theme::accent);
-            HGDIOBJ ob = SelectObject(dc, nb), op = SelectObject(dc, sp);
-            Rectangle(dc, th.left, th.top, th.right, th.bottom);
-            SelectObject(dc, ob);
-            SelectObject(dc, op);
-            DeleteObject(sp);
+            CPen sp(PS_SOLID, 2, Theme::accent);
+            CPen* op = dc->SelectObject(&sp);
+            CGdiObject* ob = dc->SelectStockObject(NULL_BRUSH);
+            dc->Rectangle(&th);
+            dc->SelectObject(ob);
+            dc->SelectObject(op);
         }
         const MediaInfo& mi = g_project.media[i];
         textIn(dc, { r.left, th.bottom + 2, r.right, th.bottom + 18 }, mi.name, sel ? RGB(255, 255, 255) : Theme::text,
@@ -1073,11 +1072,11 @@ static void drawPool(HDC dc) {
         fillRc(dc, db, RGB(0, 0, 0));
         textIn(dc, db, fmtTime(mi.duration), RGB(230, 230, 236), DT_CENTER | DT_VCENTER | DT_SINGLELINE, fSmall);
     }
-    RestoreDC(dc, saved);
+    dc->RestoreDC(saved);
     lineTo(dc, g_rcPool.left, g.bottom, g_rcPool.right, g.bottom, Theme::line);
 }
 
-static void drawMeta(HDC dc) {
+static void drawMeta(CDC* dc) {
     if (rw(g_rcMeta) <= 0 || !inv(g_rcMeta)) return;
     fillRc(dc, g_rcMeta, Theme::panel);
     panelHeader(dc, g_rcMeta, L"Metadatos");
@@ -1108,7 +1107,7 @@ static void drawMeta(HDC dc) {
 }
 
 // ---- Inspector
-static void drawInspector(HDC dc) {
+static void drawInspector(CDC* dc) {
     if (rw(g_rcInsp) <= 0 || !inv(g_rcInsp)) return;
     fillRc(dc, g_rcInsp, Theme::panel);
     panelHeader(dc, g_rcInsp, L"Inspector");
@@ -1131,11 +1130,11 @@ static void drawInspector(HDC dc) {
 }
 
 // ---- Linea de tiempo
-static void drawTimeline(HDC dc) {
+static void drawTimeline(CDC* dc) {
     const RECT& r = g_rcTimeline;
     if (rw(r) <= 0 || !inv(r)) return;
-    int saved = SaveDC(dc);
-    IntersectClipRect(dc, r.left, r.top, r.right, r.bottom);
+    int saved = dc->SaveDC();
+    dc->IntersectClipRect(r.left, r.top, r.right, r.bottom);
     fillRc(dc, r, Theme::bg);
 
     const int x0v = r.left + TL_HDR;
@@ -1154,8 +1153,8 @@ static void drawTimeline(HDC dc) {
     }
 
     // area desplazable
-    SaveDC(dc);
-    IntersectClipRect(dc, x0v, r.top, r.right, r.bottom);
+    dc->SaveDC();
+    dc->IntersectClipRect(x0v, r.top, r.right, r.bottom);
 
     // regla
     RECT ruler{ x0v, r.top, r.right, r.top + RULER_H };
@@ -1198,9 +1197,9 @@ static void drawTimeline(HDC dc) {
         int textX = x0 + 8;
         if (c.media < (int)g_thumbs.size() && g_thumbs[c.media] && x1 - x0 > 110) {
             int th = TRACK1_H - 8, tw = th * 16 / 9;
-            SetStretchBltMode(dc, HALFTONE);
-            SetBrushOrgEx(dc, 0, 0, nullptr);
-            StretchBlt(dc, x0 + 4, y1 + 4, tw, th, g_thumbs[c.media]->dc, 0, 0, THUMB_W, THUMB_H, SRCCOPY);
+            dc->SetStretchBltMode(HALFTONE);
+            dc->SetBrushOrg(0, 0);
+            dc->StretchBlt(x0 + 4, y1 + 4, tw, th, CDC::FromHandle(g_thumbs[c.media]->dc), 0, 0, THUMB_W, THUMB_H, SRCCOPY);
             textX = x0 + 4 + tw + 8;
         }
         RECT tr{ textX, y1 + 8, x1 - 8, y1 + 26 };
@@ -1251,8 +1250,8 @@ static void drawTimeline(HDC dc) {
             // forma de onda (escalada por el volumen)
             if (const AudioSource* as = g_bank.get(a.media)) {
                 const auto& pk = as->peaks();
-                HPEN wp = CreatePen(PS_SOLID, 1, a.mute ? RGB(120, 126, 128) : RGB(150, 235, 200));
-                HGDIOBJ owp = SelectObject(dc, wp);
+                CPen wp(PS_SOLID, 1, a.mute ? RGB(120, 126, 128) : RGB(150, 235, 200));
+                CPen* owp = dc->SelectObject(&wp);
                 const int cy = ya + 24, half = 11;
                 const double vol = std::min(1.0, a.volume / 100.0);
                 int px0 = std::max(x0 + 3, x0v), px1 = std::min(x1 - 4, (int)r.right);
@@ -1263,11 +1262,10 @@ static void drawTimeline(HDC dc) {
                     int m = 0;
                     for (int64_t k = std::max<int64_t>(0, w0); k < w1 && k < (int64_t)pk.size(); ++k) m = std::max(m, (int)pk[(size_t)k]);
                     int hh = std::max(0, (int)std::lround(half * vol * (m / 255.0)));
-                    MoveToEx(dc, px, cy - hh, nullptr);
-                    LineTo(dc, px, cy + hh + 1);
+                    dc->MoveTo(px, cy - hh);
+                    dc->LineTo(px, cy + hh + 1);
                 }
-                SelectObject(dc, owp);
-                DeleteObject(wp);
+                dc->SelectObject(owp);
             }
             // rampas de fundido
             if (a.fadeIn > 0)  lineTo(dc, x0 + 2, ya + TRACK3_H - 3, x0 + 2 + (int)(a.fadeIn * g_pps), ya + 14, RGB(255, 255, 255));
@@ -1288,7 +1286,7 @@ static void drawTimeline(HDC dc) {
     int px = timeToX(g_playhead);
     lineTo(dc, px, r.top, px, r.bottom, Theme::accent, 2);
     triangle(dc, { px - 7, r.top }, { px + 7, r.top }, { px, r.top + 12 }, Theme::accent);
-    RestoreDC(dc, -1);
+    dc->RestoreDC(-1);
 
     // cabeceras de pista (columna izquierda)
     RECT hdr{ r.left, r.top, x0v, r.bottom };
@@ -1306,10 +1304,10 @@ static void drawTimeline(HDC dc) {
         trackHdr(y3, TRACK3_H, L"A1");
         trackHdr(y4, TRACK3_H, L"A2");
     }
-    RestoreDC(dc, saved);
+    dc->RestoreDC(saved);
 }
 
-static void drawToolsBar(HDC dc) {
+static void drawToolsBar(CDC* dc) {
     if (rw(g_rcTools) <= 0 || !inv(g_rcTools)) return;
     fillRc(dc, g_rcTools, Theme::panel);
     lineTo(dc, 0, g_rcTools.top, g_rcTools.right, g_rcTools.top, Theme::line);
@@ -1319,7 +1317,7 @@ static void drawToolsBar(HDC dc) {
 }
 
 // ---- Color
-static void drawColorPanel(HDC dc) {
+static void drawColorPanel(CDC* dc) {
     if (rw(g_rcColor) <= 0 || !inv(g_rcColor)) return;
     fillRc(dc, g_rcColor, Theme::panel);
     panelHeader(dc, g_rcColor, L"Color primario – Ruedas");
@@ -1338,7 +1336,7 @@ static void drawColorPanel(HDC dc) {
     }
 }
 
-static void drawScopePanel(HDC dc) {
+static void drawScopePanel(CDC* dc) {
     if (rw(g_rcScope) <= 0 || !inv(g_rcScope)) return;
     fillRc(dc, g_rcScope, Theme::panel);
     panelHeader(dc, g_rcScope, L"Scopes");
@@ -1349,13 +1347,13 @@ static void drawScopePanel(HDC dc) {
     double s = std::min((double)aw / g_scopeCanvas.w, (double)ah / g_scopeCanvas.h);
     int dw = (int)(g_scopeCanvas.w * s), dh = (int)(g_scopeCanvas.h * s);
     int dx = area.left + (aw - dw) / 2, dy = area.top + (ah - dh) / 2;
-    SetStretchBltMode(dc, HALFTONE);
-    SetBrushOrgEx(dc, 0, 0, nullptr);
-    StretchBlt(dc, dx, dy, dw, dh, g_scopeCanvas.dc, 0, 0, g_scopeCanvas.w, g_scopeCanvas.h, SRCCOPY);
+    dc->SetStretchBltMode(HALFTONE);
+    dc->SetBrushOrg(0, 0);
+    dc->StretchBlt(dx, dy, dw, dh, CDC::FromHandle(g_scopeCanvas.dc), 0, 0, g_scopeCanvas.w, g_scopeCanvas.h, SRCCOPY);
 }
 
 // ---- Entrega
-static void drawSettings(HDC dc) {
+static void drawSettings(CDC* dc) {
     if (rw(g_rcSettings) <= 0 || !inv(g_rcSettings)) return;
     fillRc(dc, g_rcSettings, Theme::panel);
     panelHeader(dc, g_rcSettings, L"Ajustes de entrega");
@@ -1379,7 +1377,7 @@ static void drawSettings(HDC dc) {
     }
 }
 
-static void drawQueue(HDC dc) {
+static void drawQueue(CDC* dc) {
     if (rw(g_rcQueue) <= 0 || !inv(g_rcQueue)) return;
     fillRc(dc, g_rcQueue, Theme::panel);
     panelHeader(dc, g_rcQueue, L"Cola de render");
@@ -1411,35 +1409,40 @@ static void drawQueue(HDC dc) {
     textIn(dc, { card.right - 60, card.top + 88, card.right - 12, card.top + 110 }, b, Theme::text, DT_RIGHT | DT_SINGLELINE, fUI);
 }
 
-// ---- Paint principal con buffer doble
-static HDC g_memDC = nullptr;
-static HBITMAP g_memBmp = nullptr;
-static HGDIOBJ g_memOld = nullptr;
+// ---- Paint principal con buffer doble (CDC + CBitmap en memoria)
+static CDC     g_memDC;
+static CBitmap g_memBmp;
+static CBitmap* g_memOld = nullptr;
 static int g_memW = 0, g_memH = 0;
 
-static void ensureBack(HDC hdc, int W, int H) {
-    if (!g_memDC) g_memDC = CreateCompatibleDC(hdc);
-    if (!g_memBmp || g_memW != W || g_memH != H) {
-        HBITMAP nb = CreateCompatibleBitmap(hdc, W, H);
-        HGDIOBJ old = SelectObject(g_memDC, nb);
-        if (!g_memOld) g_memOld = old;
-        if (g_memBmp) DeleteObject(g_memBmp);
-        g_memBmp = nb;
+static void ensureBack(CDC* screen, int W, int H) {
+    if (!g_memDC.GetSafeHdc()) g_memDC.CreateCompatibleDC(screen);
+    if (!g_memBmp.GetSafeHandle() || g_memW != W || g_memH != H) {
+        if (g_memOld) { g_memDC.SelectObject(g_memOld); g_memOld = nullptr; }
+        g_memBmp.DeleteObject();
+        g_memBmp.CreateCompatibleBitmap(screen, std::max(1, W), std::max(1, H));
+        g_memOld = g_memDC.SelectObject(&g_memBmp);
         g_memW = W;
         g_memH = H;
     }
 }
 
-static void paint(HWND hwnd, HDC hdc, const RECT& pr) {
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    ensureBack(hdc, rc.right, rc.bottom);
-    HDC dc = g_memDC;
+static void releaseBack() {
+    if (g_memOld) { g_memDC.SelectObject(g_memOld); g_memOld = nullptr; }
+    g_memBmp.DeleteObject();
+    g_memDC.DeleteDC();
+}
+
+static void paint(CWnd* wnd, CDC* screen, const RECT& pr) {
+    CRect rc;
+    wnd->GetClientRect(&rc);
+    ensureBack(screen, rc.right, rc.bottom);
+    CDC* dc = &g_memDC;
     g_paintRc = pr;
-    int saved = SaveDC(dc);
-    IntersectClipRect(dc, pr.left, pr.top, pr.right, pr.bottom);
-    SetBkMode(dc, TRANSPARENT);
-    SelectObject(dc, fUI);
+    int saved = dc->SaveDC();
+    dc->IntersectClipRect(pr.left, pr.top, pr.right, pr.bottom);
+    dc->SetBkMode(TRANSPARENT);
+    dc->SelectObject(fUI);
     fillRc(dc, rc, Theme::bg);
 
     drawTitleBar(dc);
@@ -1455,8 +1458,8 @@ static void paint(HWND hwnd, HDC hdc, const RECT& pr) {
     drawTimeline(dc);
     drawPageBar(dc, rc.right);
 
-    RestoreDC(dc, saved);
-    BitBlt(hdc, pr.left, pr.top, rw(pr), rh(pr), dc, pr.left, pr.top, SRCCOPY);
+    dc->RestoreDC(saved);
+    screen->BitBlt(pr.left, pr.top, rw(pr), rh(pr), dc, pr.left, pr.top, SRCCOPY);
 }
 
 // ---------------- CONTROLADOR: linea de tiempo ----------------
@@ -1466,7 +1469,7 @@ static int    g_dragStartX = 0;
 static bool   g_didUndo = false;
 static double g_oIn = 0, g_oOut = 0, g_oStart = 0, g_oDur = 0;
 
-static void onTimelineDown(HWND hwnd, int mx, int my) {
+static void onTimelineDown(CWnd* wnd, int mx, int my) {
     Hit h = hitTest(mx, my);
     g_dragStartX = mx;
     g_didUndo = false;
@@ -1474,8 +1477,8 @@ static void onTimelineDown(HWND hwnd, int mx, int my) {
     switch (h.type) {
     case H_RULER:
         g_drag = D_SCRUB;
-        SetCapture(hwnd);
-        setPlayhead(hwnd, xToTime(mx));
+        wnd->SetCapture();
+        setPlayhead(wnd, xToTime(mx));
         return;
     case H_CLIP: case H_CLIP_L: case H_CLIP_R: {
         g_selClip = h.idx;
@@ -1510,22 +1513,22 @@ static void onTimelineDown(HWND hwnd, int mx, int my) {
         g_drag = D_SCRUB;
         syncInspector();
         updateEnable();
-        layoutAll(hwnd);
-        setPlayhead(hwnd, xToTime(mx));
-        SetCapture(hwnd);
-        invalidateTimeline(hwnd);
+        layoutAll(wnd);
+        setPlayhead(wnd, xToTime(mx));
+        wnd->SetCapture();
+        invalidateTimeline(wnd);
         return;
     }
-    SetCapture(hwnd);
+    wnd->SetCapture();
     syncInspector();
     updateEnable();
-    layoutAll(hwnd);
-    InvalidateRect(hwnd, nullptr, FALSE);
+    layoutAll(wnd);
+    wnd->InvalidateRect(nullptr, FALSE);
 }
 
-static void onTimelineMove(HWND hwnd, int mx, int my) {
+static void onTimelineMove(CWnd* wnd, int mx, int my) {
     if (g_drag == D_NONE) return;
-    if (g_drag == D_SCRUB) { setPlayhead(hwnd, xToTime(mx)); return; }
+    if (g_drag == D_SCRUB) { setPlayhead(wnd, xToTime(mx)); return; }
     if (std::abs(mx - g_dragStartX) < 3 && !g_didUndo) return;
     if (!g_didUndo) { pushUndo(); g_didUndo = true; }
 
@@ -1584,17 +1587,17 @@ static void onTimelineMove(HWND hwnd, int mx, int my) {
         }
     }
     g_playhead = std::clamp(g_playhead, 0.0, g_project.duration());
-    renderPreview(hwnd);
-    invalidateTimeline(hwnd);
+    renderPreview(wnd);
+    invalidateTimeline(wnd);
 }
 
 // ---------------- CONTROLADOR: widgets ----------------
-static void applyWidget(HWND hwnd, int id) {
+static void applyWidget(CWnd* wnd, int id) {
     Widget* w = g_w[id];
     if (id == CID_TLZOOM) {
         g_pps = w->val;
         clampScroll();
-        invalidateTimeline(hwnd);
+        invalidateTimeline(wnd);
         return;
     }
     if (Clip* c = selClip()) {
@@ -1627,8 +1630,8 @@ static void applyWidget(HWND hwnd, int id) {
         default: break;
         }
     }
-    renderPreview(hwnd);
-    invalidateTimeline(hwnd);
+    renderPreview(wnd);
+    invalidateTimeline(wnd);
 }
 
 static void resetGrade(Clip& c) {
@@ -1636,33 +1639,33 @@ static void resetGrade(Clip& c) {
     c.lift = c.gamma = c.gain = Wheel{};
 }
 
-static void onWidget(HWND hwnd, int id, int ev) {
+static void onWidget(CWnd* wnd, int id, int ev) {
     Widget* w = findWidget(id);
     if (!w) return;
 
     if (w->type == WT_SLIDER || w->type == WT_WHEEL) {
         if (ev == EV_BEGIN) { if (id != CID_TLZOOM) pushUndo(); }
-        else if (ev == EV_CHANGE) applyWidget(hwnd, id);
-        else if (ev == EV_END) { updateEnable(); SetFocus(hwnd); }
+        else if (ev == EV_CHANGE) applyWidget(wnd, id);
+        else if (ev == EV_END) { updateEnable(); wnd->SetFocus(); }
         return;
     }
     if (ev != EV_CLICK) return;
 
     switch (id) {
-    case CID_IMPORT: doImport(hwnd); break;
-    case CID_ADDCLIP: addClip(hwnd, g_selMedia); break;
-    case CID_ADDAUDIO: addAudio(hwnd, g_selMedia); break;
+    case CID_IMPORT: doImport(wnd); break;
+    case CID_ADDCLIP: addClip(wnd, g_selMedia); break;
+    case CID_ADDAUDIO: addAudio(wnd, g_selMedia); break;
     case CID_A_MUTE:
-        if (selAudio()) { pushUndo(); selAudio()->mute = w->checked; afterEdit(hwnd); }
+        if (selAudio()) { pushUndo(); selAudio()->mute = w->checked; afterEdit(wnd); }
         break;
-    case CID_PLAY: togglePlay(hwnd); break;
-    case CID_HOME: setPlayhead(hwnd, 0.0); followPlayhead(); break;
-    case CID_END: setPlayhead(hwnd, g_project.duration()); followPlayhead(); break;
-    case CID_SPLIT: doSplit(hwnd); break;
-    case CID_DELETE: doDelete(hwnd); break;
-    case CID_ADDTEXT: doAddText(hwnd); return; // el foco queda en el cuadro de texto
-    case CID_UNDO: doUndo(hwnd); break;
-    case CID_REDO: doRedo(hwnd); break;
+    case CID_PLAY: togglePlay(wnd); break;
+    case CID_HOME: setPlayhead(wnd, 0.0); followPlayhead(); break;
+    case CID_END: setPlayhead(wnd, g_project.duration()); followPlayhead(); break;
+    case CID_SPLIT: doSplit(wnd); break;
+    case CID_DELETE: doDelete(wnd); break;
+    case CID_ADDTEXT: doAddText(wnd); return; // el foco queda en el cuadro de texto
+    case CID_UNDO: doUndo(wnd); break;
+    case CID_REDO: doRedo(wnd); break;
     case CID_RESETFX:
         if (selClip()) {
             pushUndo();
@@ -1670,11 +1673,11 @@ static void onWidget(HWND hwnd, int id, int ev) {
             resetGrade(*c);
             c->filter = Filter::None; c->speed = 1.0; c->trans = Trans::None;
             c->zoom = 100; c->posX = c->posY = 0;
-            afterEdit(hwnd);
+            afterEdit(wnd);
         }
         break;
     case CID_RESETGRADE:
-        if (selClip()) { pushUndo(); resetGrade(*selClip()); afterEdit(hwnd); }
+        if (selClip()) { pushUndo(); resetGrade(*selClip()); afterEdit(wnd); }
         break;
     case CID_SPEED: case CID_FILTER: case CID_TRANS: case CID_TRANSDUR:
         if (selClip()) {
@@ -1684,106 +1687,106 @@ static void onWidget(HWND hwnd, int id, int ev) {
             if (id == CID_FILTER)   c->filter = (Filter)std::clamp(w->sel, 0, 3);
             if (id == CID_TRANS)    c->trans = (Trans)std::clamp(w->sel, 0, 1);
             if (id == CID_TRANSDUR) c->transDur = kTransDurs[std::clamp(w->sel, 0, 2)];
-            afterEdit(hwnd);
+            afterEdit(wnd);
         }
         break;
     case CID_TXT_COLOR:
-        if (selText()) { pushUndo(); selText()->rgb = kColors[std::clamp(w->sel, 0, 5)].rgb; afterEdit(hwnd); }
+        if (selText()) { pushUndo(); selText()->rgb = kColors[std::clamp(w->sel, 0, 5)].rgb; afterEdit(wnd); }
         break;
     case CID_TXT_BOX:
-        if (selText()) { pushUndo(); selText()->box = w->checked; renderPreview(hwnd); }
+        if (selText()) { pushUndo(); selText()->box = w->checked; renderPreview(wnd); }
         break;
     case CID_SCOPE:
         g_scopeMode = w->sel;
-        renderPreview(hwnd);
+        renderPreview(wnd);
         break;
     case CID_FPS: {
         static const int kFps[4] = { 24, 25, 30, 60 };
         g_project.fps = kFps[std::clamp(w->sel, 0, 3)];
-        InvalidateRect(hwnd, nullptr, FALSE);
+        wnd->InvalidateRect(nullptr, FALSE);
         break;
     }
-    case CID_RES: case CID_QUALITY: InvalidateRect(hwnd, &g_rcQueue, FALSE); break;
+    case CID_RES: case CID_QUALITY: wnd->InvalidateRect(&g_rcQueue, FALSE); break;
     case CID_BROWSE: {
         std::wstring p;
-        if (pickFile(hwnd, true, L"Video MP4\0*.mp4\0", L"mp4", p)) { g_outPath = p; InvalidateRect(hwnd, &g_rcSettings, FALSE); }
+        if (pickFile(wnd, true, L"Video MP4\0*.mp4\0", L"mp4", p)) { g_outPath = p; wnd->InvalidateRect(&g_rcSettings, FALSE); }
         break;
     }
-    case CID_RENDER: doExport(hwnd); break;
+    case CID_RENDER: doExport(wnd); break;
     }
-    SetFocus(hwnd);
+    wnd->SetFocus();
 }
 
 // ---------------- Ventana principal ----------------
-static Widget* mkW(HWND p, WType t, int id, const wchar_t* text) {
+static Widget* mkW(CWnd* p, WType t, int id, const wchar_t* text) {
     Widget* w = createWidget(p, t, id, text);
     g_w[id] = w;
     return w;
 }
-static Widget* mkSlider(HWND p, int id, const wchar_t* text, double mn, double mx, double def, const wchar_t* fmt) {
+static Widget* mkSlider(CWnd* p, int id, const wchar_t* text, double mn, double mx, double def, const wchar_t* fmt) {
     Widget* w = mkW(p, WT_SLIDER, id, text);
     w->minv = mn; w->maxv = mx; w->def = def; w->val = def; w->fmt = fmt;
     return w;
 }
-static Widget* mkDrop(HWND p, int id, const wchar_t* text, std::vector<std::wstring> items, int sel = 0) {
+static Widget* mkDrop(CWnd* p, int id, const wchar_t* text, std::vector<std::wstring> items, int sel = 0) {
     Widget* w = mkW(p, WT_DROP, id, text);
     w->items = std::move(items);
     w->sel = sel;
     return w;
 }
 
-static void createControls(HWND hwnd) {
-    mkW(hwnd, WT_BUTTON, CID_IMPORT, L"Importar medios");
-    mkW(hwnd, WT_BUTTON, CID_ADDCLIP, L"+ Video")->primary = true;
-    mkW(hwnd, WT_BUTTON, CID_ADDAUDIO, L"+ Audio");
-    mkW(hwnd, WT_BUTTON, CID_HOME, L"")->icon = IC_PREV;
-    mkW(hwnd, WT_BUTTON, CID_PLAY, L"")->icon = IC_PLAY;
-    mkW(hwnd, WT_BUTTON, CID_END, L"")->icon = IC_NEXT;
-    mkW(hwnd, WT_BUTTON, CID_SPLIT, L"Dividir");
-    mkW(hwnd, WT_BUTTON, CID_DELETE, L"Eliminar");
-    mkW(hwnd, WT_BUTTON, CID_ADDTEXT, L"+ Título");
-    mkW(hwnd, WT_BUTTON, CID_UNDO, L"Deshacer");
-    mkW(hwnd, WT_BUTTON, CID_REDO, L"Rehacer");
-    mkSlider(hwnd, CID_TLZOOM, L"", 20, 300, 80, L"%.0f")->step = 1;
+static void createControls(CWnd* wnd) {
+    mkW(wnd, WT_BUTTON, CID_IMPORT, L"Importar medios");
+    mkW(wnd, WT_BUTTON, CID_ADDCLIP, L"+ Video")->primary = true;
+    mkW(wnd, WT_BUTTON, CID_ADDAUDIO, L"+ Audio");
+    mkW(wnd, WT_BUTTON, CID_HOME, L"")->icon = IC_PREV;
+    mkW(wnd, WT_BUTTON, CID_PLAY, L"")->icon = IC_PLAY;
+    mkW(wnd, WT_BUTTON, CID_END, L"")->icon = IC_NEXT;
+    mkW(wnd, WT_BUTTON, CID_SPLIT, L"Dividir");
+    mkW(wnd, WT_BUTTON, CID_DELETE, L"Eliminar");
+    mkW(wnd, WT_BUTTON, CID_ADDTEXT, L"+ Título");
+    mkW(wnd, WT_BUTTON, CID_UNDO, L"Deshacer");
+    mkW(wnd, WT_BUTTON, CID_REDO, L"Rehacer");
+    mkSlider(wnd, CID_TLZOOM, L"", 20, 300, 80, L"%.0f")->step = 1;
 
-    mkDrop(hwnd, CID_SPEED, L"Velocidad", { L"0.25x (muy lento)", L"0.5x (lento)", L"0.75x", L"1x (normal)", L"1.5x", L"2x (rápido)", L"3x", L"4x" }, 3);
-    mkSlider(hwnd, CID_ZOOM, L"Zoom", 10, 400, 100, L"%.0f%%");
-    mkSlider(hwnd, CID_POSX, L"Posición X", -100, 100, 0, L"%+.0f");
-    mkSlider(hwnd, CID_POSY, L"Posición Y", -100, 100, 0, L"%+.0f");
-    mkSlider(hwnd, CID_BRIGHT, L"Brillo", -100, 100, 0, L"%+.0f");
-    mkSlider(hwnd, CID_CONTRAST, L"Contraste", -100, 100, 0, L"%+.0f");
-    mkSlider(hwnd, CID_SAT, L"Saturación", -100, 100, 0, L"%+.0f");
-    mkSlider(hwnd, CID_TEMP, L"Temperatura", -100, 100, 0, L"%+.0f");
-    mkSlider(hwnd, CID_TINT, L"Tinte", -100, 100, 0, L"%+.0f");
-    mkDrop(hwnd, CID_FILTER, L"Filtro", { L"Ninguno", L"Escala de grises", L"Bordes (Sobel)", L"Invertir colores" });
-    mkDrop(hwnd, CID_TRANS, L"Transición", { L"Ninguna", L"Fundido a negro" });
-    mkDrop(hwnd, CID_TRANSDUR, L"Duración", { L"0.5 s", L"1 s", L"2 s" });
-    mkW(hwnd, WT_BUTTON, CID_RESETFX, L"Restablecer clip");
-    mkW(hwnd, WT_BUTTON, CID_RESETGRADE, L"Restablecer color");
+    mkDrop(wnd, CID_SPEED, L"Velocidad", { L"0.25x (muy lento)", L"0.5x (lento)", L"0.75x", L"1x (normal)", L"1.5x", L"2x (rápido)", L"3x", L"4x" }, 3);
+    mkSlider(wnd, CID_ZOOM, L"Zoom", 10, 400, 100, L"%.0f%%");
+    mkSlider(wnd, CID_POSX, L"Posición X", -100, 100, 0, L"%+.0f");
+    mkSlider(wnd, CID_POSY, L"Posición Y", -100, 100, 0, L"%+.0f");
+    mkSlider(wnd, CID_BRIGHT, L"Brillo", -100, 100, 0, L"%+.0f");
+    mkSlider(wnd, CID_CONTRAST, L"Contraste", -100, 100, 0, L"%+.0f");
+    mkSlider(wnd, CID_SAT, L"Saturación", -100, 100, 0, L"%+.0f");
+    mkSlider(wnd, CID_TEMP, L"Temperatura", -100, 100, 0, L"%+.0f");
+    mkSlider(wnd, CID_TINT, L"Tinte", -100, 100, 0, L"%+.0f");
+    mkDrop(wnd, CID_FILTER, L"Filtro", { L"Ninguno", L"Escala de grises", L"Bordes (Sobel)", L"Invertir colores" });
+    mkDrop(wnd, CID_TRANS, L"Transición", { L"Ninguna", L"Fundido a negro" });
+    mkDrop(wnd, CID_TRANSDUR, L"Duración", { L"0.5 s", L"1 s", L"2 s" });
+    mkW(wnd, WT_BUTTON, CID_RESETFX, L"Restablecer clip");
+    mkW(wnd, WT_BUTTON, CID_RESETGRADE, L"Restablecer color");
 
-    mkSlider(hwnd, CID_TXT_SIZE, L"Tamaño", 2, 20, 8, L"%.0f%%");
-    mkSlider(hwnd, CID_TXT_X, L"Posición X", 0, 100, 50, L"%.0f%%");
-    mkSlider(hwnd, CID_TXT_Y, L"Posición Y", 0, 100, 85, L"%.0f%%");
-    mkDrop(hwnd, CID_TXT_COLOR, L"Color", { kColors[0].name, kColors[1].name, kColors[2].name, kColors[3].name, kColors[4].name, kColors[5].name });
-    mkW(hwnd, WT_TOGGLE, CID_TXT_BOX, L"Fondo oscuro detrás del texto");
+    mkSlider(wnd, CID_TXT_SIZE, L"Tamaño", 2, 20, 8, L"%.0f%%");
+    mkSlider(wnd, CID_TXT_X, L"Posición X", 0, 100, 50, L"%.0f%%");
+    mkSlider(wnd, CID_TXT_Y, L"Posición Y", 0, 100, 85, L"%.0f%%");
+    mkDrop(wnd, CID_TXT_COLOR, L"Color", { kColors[0].name, kColors[1].name, kColors[2].name, kColors[3].name, kColors[4].name, kColors[5].name });
+    mkW(wnd, WT_TOGGLE, CID_TXT_BOX, L"Fondo oscuro detrás del texto");
 
-    mkSlider(hwnd, CID_A_VOL, L"Volumen", 0, 200, 100, L"%.0f%%");
-    mkSlider(hwnd, CID_A_FIN, L"Entrada", 0, 10, 0, L"%.1f s")->step = 0.1;
-    mkSlider(hwnd, CID_A_FOUT, L"Salida", 0, 10, 0, L"%.1f s")->step = 0.1;
-    mkW(hwnd, WT_TOGGLE, CID_A_MUTE, L"Silenciar este clip de audio");
+    mkSlider(wnd, CID_A_VOL, L"Volumen", 0, 200, 100, L"%.0f%%");
+    mkSlider(wnd, CID_A_FIN, L"Entrada", 0, 10, 0, L"%.1f s")->step = 0.1;
+    mkSlider(wnd, CID_A_FOUT, L"Salida", 0, 10, 0, L"%.1f s")->step = 0.1;
+    mkW(wnd, WT_TOGGLE, CID_A_MUTE, L"Silenciar este clip de audio");
 
     const wchar_t* wn[3] = { L"Sombras  (Lift)", L"Medios  (Gamma)", L"Luces  (Gain)" };
     for (int i = 0; i < 3; ++i) {
-        Widget* w = mkW(hwnd, WT_WHEEL, CID_WH_LIFT + i, wn[i]);
+        Widget* w = mkW(wnd, WT_WHEEL, CID_WH_LIFT + i, wn[i]);
         w->minv = -1; w->maxv = 1; w->def = 0; w->step = 0.01;
     }
-    mkDrop(hwnd, CID_SCOPE, L"", { L"Forma de onda", L"Parade RGB", L"Histograma", L"Vectorscopio" });
+    mkDrop(wnd, CID_SCOPE, L"", { L"Forma de onda", L"Parade RGB", L"Histograma", L"Vectorscopio" });
 
-    mkDrop(hwnd, CID_RES, L"Resolución", { L"854 × 480  (480p)", L"1280 × 720  (HD)", L"1920 × 1080  (Full HD)" }, 1);
-    mkDrop(hwnd, CID_FPS, L"Fotogramas", { L"24 fps", L"25 fps", L"30 fps", L"60 fps" }, 2);
-    mkDrop(hwnd, CID_QUALITY, L"Calidad", { L"Baja", L"Media", L"Alta" }, 1);
-    mkW(hwnd, WT_BUTTON, CID_BROWSE, L"Examinar...");
-    mkW(hwnd, WT_BUTTON, CID_RENDER, L"Renderizar")->primary = true;
+    mkDrop(wnd, CID_RES, L"Resolución", { L"854 × 480  (480p)", L"1280 × 720  (HD)", L"1920 × 1080  (Full HD)" }, 1);
+    mkDrop(wnd, CID_FPS, L"Fotogramas", { L"24 fps", L"25 fps", L"30 fps", L"60 fps" }, 2);
+    mkDrop(wnd, CID_QUALITY, L"Calidad", { L"Baja", L"Media", L"Alta" }, 1);
+    mkW(wnd, WT_BUTTON, CID_BROWSE, L"Examinar...");
+    mkW(wnd, WT_BUTTON, CID_RENDER, L"Renderizar")->primary = true;
 
     for (int id : { CID_ZOOM, CID_POSX, CID_POSY, CID_BRIGHT, CID_CONTRAST, CID_SAT, CID_TEMP, CID_TINT }) g_w[id]->labelW = 100;
     for (int id : { CID_SPEED, CID_FILTER, CID_TRANS, CID_TRANSDUR, CID_TXT_COLOR, CID_RES, CID_FPS, CID_QUALITY }) g_w[id]->labelW = 100;
@@ -1791,9 +1794,8 @@ static void createControls(HWND hwnd) {
 
     // Cuadro de texto del inspector: control MFC (CEdit) hijo de la ventana principal
     g_editCtl.Create(WS_CHILD | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
-                     CRect(0, 0, 10, 10), CWnd::FromHandle(hwnd), CID_TXT_EDIT);
-    g_edit = g_editCtl.m_hWnd;
-    g_editCtl.SetFont(CFont::FromHandle(fUI));
+                     CRect(0, 0, 10, 10), wnd, CID_TXT_EDIT);
+    g_editCtl.SetFont(fUI);
 }
 
 // =====================================================================
@@ -1870,18 +1872,18 @@ END_MESSAGE_MAP()
 
 int CMainFrame::OnCreate(LPCREATESTRUCT cs) {
     if (CFrameWnd::OnCreate(cs) == -1) return -1;
-    HWND hwnd = m_hWnd;
+    CWnd* wnd = this;
     createFonts();
-    g_editBrush = CreateSolidBrush(Theme::field);
+    g_editBrush.CreateSolidBrush(Theme::field);
     BOOL dark = TRUE;
-    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); // barra de titulo oscura (Windows 10 2004+ / 11)
-    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
+    DwmSetWindowAttribute(m_hWnd, 20, &dark, sizeof(dark)); // barra de titulo oscura (Windows 10 2004+ / 11)
+    DwmSetWindowAttribute(m_hWnd, 19, &dark, sizeof(dark));
     g_canvas.create(640, 360);
     g_srcCanvas.create(640, 360);
     g_scopeCanvas.create(512, 256);
-    createControls(hwnd);
+    createControls(wnd);
     DragAcceptFiles(TRUE);
-    layoutAll(hwnd);
+    layoutAll(wnd);
     g_renderer.render(g_project, 0.0, g_canvas);
     updateEnable();
     syncInspector();
@@ -1890,15 +1892,15 @@ int CMainFrame::OnCreate(LPCREATESTRUCT cs) {
 }
 
 LRESULT CMainFrame::OnWidgetMsg(WPARAM wp, LPARAM lp) {
-    onWidget(m_hWnd, (int)wp, (int)lp);
+    onWidget(this, (int)wp, (int)lp);
     return 0;
 }
 
 HBRUSH CMainFrame::OnCtlColor(CDC* dc, CWnd* wnd, UINT type) {
-    if (wnd && wnd->m_hWnd == g_edit) {
+    if (wnd && wnd->GetSafeHwnd() == g_editCtl.GetSafeHwnd()) {
         dc->SetTextColor(Theme::text);
         dc->SetBkColor(Theme::field);
-        return g_editBrush;
+        return (HBRUSH)g_editBrush.GetSafeHandle();
     }
     return CFrameWnd::OnCtlColor(dc, wnd, type);
 }
@@ -1913,20 +1915,20 @@ void CMainFrame::OnTextChange() {
         g_editCtl.GetWindowText(s);
         t->text = s.GetString();
         updateEnable();
-        renderPreview(m_hWnd);
-        invalidateTimeline(m_hWnd);
+        renderPreview(this);
+        invalidateTimeline(this);
     }
 }
 
 void CMainFrame::leftDown(CPoint p, bool dbl) {
-    HWND hwnd = m_hWnd;
+    CWnd* wnd = this;
     SetFocus();
     int mx = p.x, my = p.y;
     POINT pt{ mx, my };
     if (PtInRect(&g_rcPageBar, pt)) {
-        for (int i = 0; i < 4; ++i) { RECT t = tabRect(i); if (PtInRect(&t, pt)) { setPage(hwnd, i); break; } }
+        for (int i = 0; i < 4; ++i) { RECT t = tabRect(i); if (PtInRect(&t, pt)) { setPage(wnd, i); break; } }
     } else if (PtInRect(&g_rcTimeline, pt)) {
-        onTimelineDown(hwnd, mx, my);
+        onTimelineDown(wnd, mx, my);
     } else if (rw(g_rcPool) > 0 && PtInRect(&g_rcPool, pt)) {
         int i = poolHit(mx, my);
         if (i >= 0) {
@@ -1935,24 +1937,24 @@ void CMainFrame::leftDown(CPoint p, bool dbl) {
             updateEnable();
             InvalidateRect(nullptr, FALSE);
             if (dbl) {
-                if (g_project.media[i].hasVideo) addClip(hwnd, i);
-                else addAudio(hwnd, i);
+                if (g_project.media[i].hasVideo) addClip(wnd, i);
+                else addAudio(wnd, i);
             }
         }
     } else if (rw(g_rcViewImg) > 0 && g_page != PG_MEDIA && PtInRect(&g_rcViewImg, pt)) {
-        togglePlay(hwnd);
+        togglePlay(wnd);
     }
 }
 
 void CMainFrame::OnMouseMove(UINT, CPoint pt) {
-    if (g_drag != D_NONE) onTimelineMove(m_hWnd, pt.x, pt.y);
+    if (g_drag != D_NONE) onTimelineMove(this, pt.x, pt.y);
 }
 
 void CMainFrame::OnLButtonUp(UINT, CPoint) {
     if (g_drag != D_NONE) {
         g_drag = D_NONE;
         ReleaseCapture();
-        afterEdit(m_hWnd);
+        afterEdit(this);
     }
 }
 
@@ -1972,7 +1974,7 @@ BOOL CMainFrame::OnSetCursor(CWnd* w, UINT hit, UINT msg) {
 }
 
 BOOL CMainFrame::OnMouseWheel(UINT flags, short delta, CPoint screenPt) {
-    HWND hwnd = m_hWnd;
+    CWnd* wnd = this;
     CPoint p = screenPt;
     ScreenToClient(&p);
     POINT pt{ p.x, p.y };
@@ -1987,7 +1989,7 @@ BOOL CMainFrame::OnMouseWheel(UINT flags, short delta, CPoint screenPt) {
             g_scrollX -= delta / 120 * 90;
         }
         clampScroll();
-        invalidateTimeline(hwnd);
+        invalidateTimeline(wnd);
     } else if (rw(g_rcPool) > 0 && PtInRect(&g_rcPool, pt)) {
         g_poolScroll -= delta / 120 * 60;
         clampPoolScroll();
@@ -1997,32 +1999,32 @@ BOOL CMainFrame::OnMouseWheel(UINT flags, short delta, CPoint screenPt) {
 }
 
 void CMainFrame::OnKeyDown(UINT key, UINT rep, UINT flags) {
-    HWND hwnd = m_hWnd;
+    CWnd* wnd = this;
     WPARAM wp = key;
     bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     if (shift && !ctrl) { // paginas como en Resolve: Shift+2 Medios, +4 Edicion, +6 Color, +8 Entrega
-        if (wp == '2') { setPage(hwnd, PG_MEDIA); return; }
-        if (wp == '4') { setPage(hwnd, PG_EDIT); return; }
-        if (wp == '6') { setPage(hwnd, PG_COLOR); return; }
-        if (wp == '8') { setPage(hwnd, PG_DELIVER); return; }
+        if (wp == '2') { setPage(wnd, PG_MEDIA); return; }
+        if (wp == '4') { setPage(wnd, PG_EDIT); return; }
+        if (wp == '6') { setPage(wnd, PG_COLOR); return; }
+        if (wp == '8') { setPage(wnd, PG_DELIVER); return; }
     }
-    if (ctrl && wp == 'Z') { doUndo(hwnd); return; }
-    if (ctrl && wp == 'Y') { doRedo(hwnd); return; }
-    if (ctrl && wp == 'I') { doImport(hwnd); return; }
-    if (ctrl && wp == 'E') { setPage(hwnd, PG_DELIVER); return; }
-    if (ctrl && wp == 'B') { doSplit(hwnd); return; }
-    if (wp == VK_SPACE || wp == 'L') { togglePlay(hwnd); return; }
-    if (wp == 'K') { if (g_playing) stopPlay(hwnd); return; }
-    if (wp == 'S' && !ctrl) { doSplit(hwnd); return; }
-    if (wp == VK_DELETE) { doDelete(hwnd); return; }
-    if (wp == VK_HOME) { setPlayhead(hwnd, 0.0); followPlayhead(); return; }
-    if (wp == VK_END) { setPlayhead(hwnd, g_project.duration()); followPlayhead(); return; }
-    if (wp == VK_UP) { jumpEdit(hwnd, -1); return; }
-    if (wp == VK_DOWN) { jumpEdit(hwnd, +1); return; }
+    if (ctrl && wp == 'Z') { doUndo(wnd); return; }
+    if (ctrl && wp == 'Y') { doRedo(wnd); return; }
+    if (ctrl && wp == 'I') { doImport(wnd); return; }
+    if (ctrl && wp == 'E') { setPage(wnd, PG_DELIVER); return; }
+    if (ctrl && wp == 'B') { doSplit(wnd); return; }
+    if (wp == VK_SPACE || wp == 'L') { togglePlay(wnd); return; }
+    if (wp == 'K') { if (g_playing) stopPlay(wnd); return; }
+    if (wp == 'S' && !ctrl) { doSplit(wnd); return; }
+    if (wp == VK_DELETE) { doDelete(wnd); return; }
+    if (wp == VK_HOME) { setPlayhead(wnd, 0.0); followPlayhead(); return; }
+    if (wp == VK_END) { setPlayhead(wnd, g_project.duration()); followPlayhead(); return; }
+    if (wp == VK_UP) { jumpEdit(wnd, -1); return; }
+    if (wp == VK_DOWN) { jumpEdit(wnd, +1); return; }
     if (wp == VK_LEFT || wp == VK_RIGHT) {
         double step = shift ? 1.0 : 1.0 / std::max(1.0, g_project.fps);
-        setPlayhead(hwnd, g_playhead + (wp == VK_LEFT ? -step : step));
+        setPlayhead(wnd, g_playhead + (wp == VK_LEFT ? -step : step));
         followPlayhead();
         return;
     }
@@ -2030,7 +2032,7 @@ void CMainFrame::OnKeyDown(UINT key, UINT rep, UINT flags) {
 }
 
 void CMainFrame::OnTimer(UINT_PTR id) {
-    HWND hwnd = m_hWnd;
+    CWnd* wnd = this;
     if (id == (UINT_PTR)CID_TIMER && g_playing) {
         double t;
         if (g_engine.running()) {
@@ -2040,18 +2042,18 @@ void CMainFrame::OnTimer(UINT_PTR id) {
             t = g_playStartT + (GetTickCount64() - g_playStartTick) / 1000.0;
         }
         double dur = g_project.duration();
-        if (t >= dur) { t = dur; stopPlay(hwnd); }
+        if (t >= dur) { t = dur; stopPlay(wnd); }
         g_playhead = t;
         followPlayhead();
-        renderPreview(hwnd);
-        invalidateTimeline(hwnd);
+        renderPreview(wnd);
+        invalidateTimeline(wnd);
     }
 }
 
 LRESULT CMainFrame::OnExportProgress(WPARAM wp, LPARAM) {
     g_exportPct = (int)wp;
     InvalidateRect(&g_rcQueue, FALSE);
-    invalidateBar(m_hWnd);
+    invalidateBar(this);
     return 0;
 }
 
@@ -2064,12 +2066,12 @@ LRESULT CMainFrame::OnExportDone(WPARAM wp, LPARAM) {
     if (wp) {
         g_exportPct = 100;
         g_msg = L"Video exportado: " + g_outPath;
-        msgBox(m_hWnd, (L"Video exportado correctamente:\n" + g_outPath).c_str(), L"VideoLab", MB_ICONINFORMATION);
+        msgBox(this, (L"Video exportado correctamente:\n" + g_outPath).c_str(), L"VideoLab", MB_ICONINFORMATION);
     } else {
         g_exportPct = 0;
         g_msg = toWide(g_exportErr);
         if (g_exportErr != "Exportacion cancelada.")
-            msgBox(m_hWnd, toWide(g_exportErr).c_str(), L"No se pudo exportar", MB_ICONERROR);
+            msgBox(this, toWide(g_exportErr).c_str(), L"No se pudo exportar", MB_ICONERROR);
     }
     InvalidateRect(nullptr, FALSE);
     return 0;
@@ -2079,7 +2081,7 @@ void CMainFrame::OnDropFiles(HDROP drop) {
     UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
     for (UINT i = 0; i < n; ++i) {
         wchar_t path[MAX_PATH];
-        if (DragQueryFileW(drop, i, path, MAX_PATH)) importFile(m_hWnd, path);
+        if (DragQueryFileW(drop, i, path, MAX_PATH)) importFile(this, path);
     }
     DragFinish(drop);
 }
@@ -2091,19 +2093,19 @@ void CMainFrame::OnGetMinMaxInfo(MINMAXINFO* mm) {
 
 void CMainFrame::OnPaint() {
     CPaintDC dc(this);   // BeginPaint / EndPaint
-    paint(m_hWnd, dc.GetSafeHdc(), dc.m_ps.rcPaint);
+    paint(this, &dc, dc.m_ps.rcPaint);
 }
 
 void CMainFrame::OnSize(UINT type, int, int) {
-    if (type != SIZE_MINIMIZED && g_edit) {
-        layoutAll(m_hWnd);
+    if (type != SIZE_MINIMIZED && g_editCtl.GetSafeHwnd()) {
+        layoutAll(this);
         InvalidateRect(nullptr, FALSE);
     }
 }
 
 void CMainFrame::OnClose() {
     if (g_exporting) {
-        if (msgBox(m_hWnd, L"Hay un render en curso. Se cancelará si sales. ¿Quieres salir?", L"VideoLab",
+        if (msgBox(this, L"Hay un render en curso. Se cancelará si sales. ¿Quieres salir?", L"VideoLab",
                    MB_YESNO | MB_ICONQUESTION) != IDYES) return;
     }
     CFrameWnd::OnClose();
@@ -2118,12 +2120,8 @@ void CMainFrame::OnDestroy() {
     g_canvas.destroy();
     g_srcCanvas.destroy();
     g_scopeCanvas.destroy();
-    if (g_memDC) {
-        if (g_memOld) SelectObject(g_memDC, g_memOld);
-        if (g_memBmp) DeleteObject(g_memBmp);
-        DeleteDC(g_memDC);
-    }
-    if (g_editBrush) DeleteObject(g_editBrush);
+    releaseBack();
+    g_editBrush.DeleteObject();
     destroyFonts();
     CFrameWnd::OnDestroy();
 }
@@ -2135,7 +2133,6 @@ class CVideoLabApp : public CWinApp {
 public:
     BOOL InitInstance() override {
         CWinApp::InitInstance();
-        registerWidgetClasses(AfxGetInstanceHandle());
         auto* frame = new CMainFrame();
         m_pMainWnd = frame;
         if (!frame->Create(nullptr, L"VideoLab", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CFrameWnd::rectDefault))

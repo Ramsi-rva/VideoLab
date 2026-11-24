@@ -1,6 +1,6 @@
 # VideoLab - Editor de video (estilo DaVinci Resolve simplificado)
 
-Editor de video y audio de escritorio en C++17 con **MFC** (CWinApp/CFrameWnd + mapa de mensajes), dibujo GDI, WinMM y **FFmpeg 9**. Interfaz oscura organizada por **paginas**,
+Editor de video y audio de escritorio en C++17 con **MFC** (CWinApp, CFrameWnd, controles CWnd propios con mapa de mensajes y dibujo con CDC), WinMM y **FFmpeg 9**. Interfaz oscura organizada por **paginas**,
 como DaVinci Resolve.
 
 ## Paginas (barra inferior)
@@ -46,15 +46,15 @@ como DaVinci Resolve.
 | Capa | Archivos |
 |---|---|
 | Modelo | `Project.h` (clips, audio, titulos, color), `MediaSource.*` (video con FFmpeg), `AudioSource.*` (audio con FFmpeg + swresample a PCM 44.1 kHz), `AudioMix.*` (mezcla de pistas), `Renderer.*` (compone cada frame y aplica el color), `Scopes.*`, `Exporter.*` (codifica MP4) |
-| Vista | `Theme.h`, `Widgets.*` (controles propios con tema oscuro), `AudioEngine.*` (salida de sonido con waveOut), `paint` y `layoutAll` en `main.cpp` |
+| Vista | `Theme.h` (primitivas de dibujo sobre `CDC` con `CPen`, `CBrush`, `CFont`), `Widgets.*` (`CVLWidget` y `CVLPopup`, controles MFC derivados de `CWnd` con su propio mapa de mensajes), `AudioEngine.*` (salida de sonido con waveOut), `paint` y `layoutAll` en `main.cpp` |
 | Controlador | `CMainFrame` (CFrameWnd con `BEGIN_MESSAGE_MAP`), `CVideoLabApp` (CWinApp), `onWidget` y manejadores de raton/teclado en `main.cpp` |
 
 ## Requisitos
-- Visual Studio 2022 con la carga "Desarrollo de escritorio con C++" **y el componente "C++ MFC para las herramientas de compilacion mas recientes (x86 y x64)"** (Visual Studio Installer > Componentes individuales).
+- Visual Studio 2026 (version 18) con la carga "Desarrollo de escritorio con C++" **y el componente "C++ MFC para las herramientas de compilacion mas recientes (x86 y x64)"** (Visual Studio Installer > Componentes individuales).
 - CMake y vcpkg. vcpkg instala la version actual de FFmpeg (9.x); la version enlazada se muestra en la barra de titulo de la app (`av_version_info()`).
 - La version anterior en Win32 puro esta en `VideoLab_Win32.zip`.
 
-## Compilar (Visual Studio 2022 + vcpkg + CMake)
+## Compilar (Visual Studio 2026 + vcpkg + CMake)
 ```bat
 set VCPKG_ROOT=C:\vcpkg
 cmake --preset windows-x64

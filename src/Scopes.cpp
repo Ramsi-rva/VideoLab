@@ -18,25 +18,27 @@ static inline void put(uint8_t* o, int W, int x, int y, int r, int g, int b) {
 
 static void grid(Canvas& cv, bool horizontal, int levels) {
     // lineas de referencia (0..255 en 'levels' pasos)
-    HFONT of = (HFONT)SelectObject(cv.dc, fSmall);
-    SetBkMode(cv.dc, TRANSPARENT);
-    SetTextColor(cv.dc, RGB(120, 120, 132));
+    CDC* dc = CDC::FromHandle(cv.dc);   // el lienzo (DIB) se dibuja con un CDC de MFC
+    CFont* of = dc->SelectObject(fSmall);
+    dc->SetBkMode(TRANSPARENT);
+    dc->SetTextColor(RGB(120, 120, 132));
     for (int i = 0; i <= levels; ++i) {
         if (horizontal) {
             int y = (cv.h - 1) - i * (cv.h - 1) / levels;
-            lineTo(cv.dc, 0, y, cv.w, y, RGB(44, 44, 52));
+            lineTo(dc, 0, y, cv.w, y, RGB(44, 44, 52));
             wchar_t b[8];
             wfmt(b, L"%d", i * 255 / levels);
-            TextOutW(cv.dc, 3, std::min(cv.h - 14, std::max(0, y - 6)), b, (int)wcslen(b));
+            dc->TextOut(3, std::min(cv.h - 14, std::max(0, y - 6)), b, (int)wcslen(b));
         } else {
             int x = i * (cv.w - 1) / levels;
-            lineTo(cv.dc, x, 0, x, cv.h, RGB(44, 44, 52));
+            lineTo(dc, x, 0, x, cv.h, RGB(44, 44, 52));
         }
     }
-    SelectObject(cv.dc, of);
+    dc->SelectObject(of);
 }
 
 void renderScope(int mode, const uint8_t* src, int sw, int sh, Canvas& cv) {
+    CDC* dc = CDC::FromHandle(cv.dc);
     if (!cv.bits || !src || sw <= 0 || sh <= 0) return;
     GdiFlush();
     const int W = cv.w, H = cv.h;
@@ -100,8 +102,8 @@ void renderScope(int mode, const uint8_t* src, int sw, int sh, Canvas& cv) {
                     float v = level(n);
                     put(o, W, k * pw + x, y, (int)(cols[k][0] * v), (int)(cols[k][1] * v), (int)(cols[k][2] * v));
                 }
-        lineTo(cv.dc, pw, 0, pw, H, RGB(60, 60, 68));
-        lineTo(cv.dc, 2 * pw, 0, 2 * pw, H, RGB(60, 60, 68));
+        lineTo(dc, pw, 0, pw, H, RGB(60, 60, 68));
+        lineTo(dc, 2 * pw, 0, 2 * pw, H, RGB(60, 60, 68));
     } else if (mode == SC_HIST) {
         uint32_t hist[3][256] = {};
         for (size_t i = 0; i < (size_t)sw * sh; ++i) {
@@ -138,39 +140,33 @@ void renderScope(int mode, const uint8_t* src, int sw, int sh, Canvas& cv) {
             }
         }
         // graticula
-        HPEN gp = CreatePen(PS_SOLID, 1, RGB(52, 52, 60));
-        HGDIOBJ op = SelectObject(cv.dc, gp), ob = SelectObject(cv.dc, GetStockObject(NULL_BRUSH));
-        Ellipse(cv.dc, cx - R, cy - R, cx + R + 1, cy + R + 1);
-        Ellipse(cv.dc, cx - R / 2, cy - R / 2, cx + R / 2 + 1, cy + R / 2 + 1);
-        SelectObject(cv.dc, op);
-        SelectObject(cv.dc, ob);
-        DeleteObject(gp);
-        lineTo(cv.dc, cx - R, cy, cx + R, cy, RGB(52, 52, 60));
-        lineTo(cv.dc, cx, cy - R, cx, cy + R, RGB(52, 52, 60));
+        ellipse(dc, cx - R, cy - R, cx + R + 1, cy + R + 1, CLR_INVALID, RGB(52, 52, 60));
+        ellipse(dc, cx - R / 2, cy - R / 2, cx + R / 2 + 1, cy + R / 2 + 1, CLR_INVALID, RGB(52, 52, 60));
+        lineTo(dc, cx - R, cy, cx + R, cy, RGB(52, 52, 60));
+        lineTo(dc, cx, cy - R, cx, cy + R, RGB(52, 52, 60));
         // linea de tono de piel (aprox. 123 grados)
-        lineTo(cv.dc, cx, cy, cx + (int)(std::cos(123 * kPi / 180) * R), cy - (int)(std::sin(123 * kPi / 180) * R), RGB(150, 100, 50));
+        lineTo(dc, cx, cy, cx + (int)(std::cos(123 * kPi / 180) * R), cy - (int)(std::sin(123 * kPi / 180) * R), RGB(150, 100, 50));
         // objetivos de color
         struct T { int r, g, b; const wchar_t* n; };
         const T ts[6] = { { 255, 0, 0, L"R" }, { 255, 255, 0, L"Yl" }, { 0, 255, 0, L"G" },
                           { 0, 255, 255, L"Cy" }, { 0, 0, 255, L"B" }, { 255, 0, 255, L"Mg" } };
-        HFONT of = (HFONT)SelectObject(cv.dc, fSmall);
-        SetBkMode(cv.dc, TRANSPARENT);
-        SetTextColor(cv.dc, RGB(120, 120, 132));
+        CFont* of = dc->SelectObject(fSmall);
+        dc->SetBkMode(TRANSPARENT);
+        dc->SetTextColor(RGB(120, 120, 132));
         for (const T& t : ts) {
             double Y = 0.299 * t.r + 0.587 * t.g + 0.114 * t.b;
             int px = cx + (int)std::lround((t.b - Y) * 0.564 / 127.5 * R);
             int py = cy - (int)std::lround((t.r - Y) * 0.713 / 127.5 * R);
             RECT box{ px - 6, py - 6, px + 7, py + 7 };
-            HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
-            HPEN bp = CreatePen(PS_SOLID, 1, RGB(t.r / 2 + 40, t.g / 2 + 40, t.b / 2 + 40));
-            HGDIOBJ o1 = SelectObject(cv.dc, bp), o2 = SelectObject(cv.dc, nb);
-            Rectangle(cv.dc, box.left, box.top, box.right, box.bottom);
-            SelectObject(cv.dc, o1);
-            SelectObject(cv.dc, o2);
-            DeleteObject(bp);
-            TextOutW(cv.dc, px + 8, py - 6, t.n, (int)wcslen(t.n));
+            CPen bp(PS_SOLID, 1, RGB(t.r / 2 + 40, t.g / 2 + 40, t.b / 2 + 40));
+            CPen* o1 = dc->SelectObject(&bp);
+            CGdiObject* o2 = dc->SelectStockObject(NULL_BRUSH);
+            dc->Rectangle(&box);
+            dc->SelectObject(o1);
+            dc->SelectObject(o2);
+            dc->TextOut(px + 8, py - 6, t.n, (int)wcslen(t.n));
         }
-        SelectObject(cv.dc, of);
+        dc->SelectObject(of);
         GdiFlush();
         for (int y = 0; y < H; ++y)
             for (int x = 0; x < W; ++x) {
