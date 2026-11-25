@@ -69,5 +69,8 @@ El audio de un video no se agrega solo: usa **+ Audio** para llevarlo a A1/A2 (e
 y sin guardar proyectos todavia.
 
 
+## Guia completa
+Ver [docs/GUIA_BUILD.md](docs/GUIA_BUILD.md): requisitos, build con CMake y vcpkg, compilacion, arquitectura MFC y funcionamiento.
+
 ## Publicar en GitHub
 Con Git y GitHub CLI instalados: `.\scripts\publish-github.ps1 -Name VideoLab -Visibility public`
